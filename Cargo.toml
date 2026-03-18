@@ -8,7 +8,7 @@ license = "Apache-2.0"
 repository = "https://github.com/yingkitw/lint"
 homepage = "https://github.com/yingkitw/lint"
 documentation = "https://docs.rs/lint"
-keywords = ["lint", "linter", "cli", "mcp", "code-quality", "static-analysis"]
+keywords = ["lint", "linter", "cli", "mcp", "code-quality"]
 categories = ["development-tools", "command-line-utilities"]
 
 [[bin]]
