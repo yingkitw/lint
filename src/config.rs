@@ -1,0 +1,178 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub paths: Vec<PathBuf>,
+    pub ignore_patterns: Vec<String>,
+    pub max_line_length: Option<usize>,
+    pub rule_set: RuleSetConfig,
+    pub output_format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleSetConfig {
+    pub enabled_rules: Vec<String>,
+    pub custom_rules_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OutputFormat {
+    Text,
+    Json,
+    Markdown,
+}
+
+pub struct ConfigBuilder {
+    paths: Vec<PathBuf>,
+    ignore_patterns: Vec<String>,
+    max_line_length: Option<usize>,
+    rule_set: RuleSetConfig,
+    output_format: OutputFormat,
+}
+
+impl ConfigBuilder {
+    pub fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            ignore_patterns: vec![
+                "node_modules".to_string(),
+                "target".to_string(),
+                ".git".to_string(),
+            ],
+            max_line_length: Some(100),
+            rule_set: RuleSetConfig {
+                enabled_rules: vec!["line-length".to_string(), "trailing-whitespace".to_string()],
+                custom_rules_path: None,
+            },
+            output_format: OutputFormat::Text,
+        }
+    }
+
+    pub fn paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.paths = paths;
+        self
+    }
+
+    pub fn ignore_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.ignore_patterns = patterns;
+        self
+    }
+
+    pub fn max_line_length(mut self, length: Option<usize>) -> Self {
+        self.max_line_length = length;
+        self
+    }
+
+    pub fn enabled_rules(mut self, rules: Vec<String>) -> Self {
+        self.rule_set.enabled_rules = rules;
+        self
+    }
+
+    pub fn custom_rules(mut self, path: Option<PathBuf>) -> Self {
+        self.rule_set.custom_rules_path = path;
+        self
+    }
+
+    pub fn output_format(mut self, format: OutputFormat) -> Self {
+        self.output_format = format;
+        self
+    }
+
+    pub fn build(self) -> Config {
+        Config {
+            paths: self.paths,
+            ignore_patterns: self.ignore_patterns,
+            max_line_length: self.max_line_length,
+            rule_set: self.rule_set,
+            output_format: self.output_format,
+        }
+    }
+}
+
+impl Default for ConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_builder_new() {
+        let builder = ConfigBuilder::new();
+        assert!(builder.paths.is_empty());
+        assert_eq!(builder.max_line_length, Some(100));
+        assert_eq!(builder.ignore_patterns.len(), 3);
+    }
+
+    #[test]
+    fn test_config_builder_paths() {
+        let builder = ConfigBuilder::new().paths(vec![
+            std::path::PathBuf::from("src"),
+            std::path::PathBuf::from("tests"),
+        ]);
+        assert_eq!(builder.paths.len(), 2);
+    }
+
+    #[test]
+    fn test_config_builder_max_line_length() {
+        let builder = ConfigBuilder::new().max_line_length(Some(120));
+        assert_eq!(builder.max_line_length, Some(120));
+    }
+
+    #[test]
+    fn test_config_builder_max_line_length_none() {
+        let builder = ConfigBuilder::new().max_line_length(None);
+        assert!(builder.max_line_length.is_none());
+    }
+
+    #[test]
+    fn test_config_builder_enabled_rules() {
+        let builder = ConfigBuilder::new().enabled_rules(vec![
+            "line-length".to_string(),
+            "trailing-whitespace".to_string(),
+        ]);
+        assert_eq!(builder.rule_set.enabled_rules.len(), 2);
+    }
+
+    #[test]
+    fn test_config_builder_output_format() {
+        let builder = ConfigBuilder::new().output_format(OutputFormat::Json);
+        assert!(matches!(builder.output_format, OutputFormat::Json));
+    }
+
+    #[test]
+    fn test_config_builder_build() {
+        let builder = ConfigBuilder::new();
+        let config = builder.build();
+        assert!(config.paths.is_empty());
+        assert_eq!(config.max_line_length, Some(100));
+    }
+
+    #[test]
+    fn test_config_builder_default() {
+        let builder = ConfigBuilder::default();
+        assert_eq!(builder.max_line_length, Some(100));
+    }
+
+    #[test]
+    fn test_config_serialization() {
+        let config = Config {
+            paths: vec![std::path::PathBuf::from("src")],
+            ignore_patterns: vec!["node_modules".to_string()],
+            max_line_length: Some(100),
+            rule_set: RuleSetConfig {
+                enabled_rules: vec!["line-length".to_string()],
+                custom_rules_path: None,
+            },
+            output_format: OutputFormat::Text,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.paths.len(), 1);
+    }
+}
