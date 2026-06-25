@@ -4,6 +4,9 @@ use std::path::Path;
 
 pub trait LanguageRule: Send + Sync {
     fn name(&self) -> &str;
+    fn category(&self) -> &str {
+        "correctness"
+    }
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
     fn supports_extension(&self, extension: &str) -> bool;
 }
@@ -327,6 +330,10 @@ pub struct SemicolonRule;
 impl LanguageRule for SemicolonRule {
     fn name(&self) -> &str {
         "missing-semicolon"
+    }
+
+    fn category(&self) -> &str {
+        "style"
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {

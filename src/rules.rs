@@ -5,6 +5,9 @@ use std::path::Path;
 
 pub trait Rule: Send + Sync {
     fn name(&self) -> &str;
+    fn category(&self) -> &str {
+        "style"
+    }
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
 }
 
@@ -37,6 +40,10 @@ impl CustomRule {
 impl Rule for CustomRule {
     fn name(&self) -> &str {
         &self.definition.name
+    }
+
+    fn category(&self) -> &str {
+        "custom"
     }
 
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage> {
@@ -84,6 +91,10 @@ impl Rule for LineLengthRule {
         "line-length"
     }
 
+    fn category(&self) -> &str {
+        "style"
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -115,6 +126,10 @@ impl Rule for TrailingWhitespaceRule {
         "trailing-whitespace"
     }
 
+    fn category(&self) -> &str {
+        "style"
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -144,6 +159,10 @@ pub struct NoTodoRule;
 impl Rule for NoTodoRule {
     fn name(&self) -> &str {
         "no-todo"
+    }
+
+    fn category(&self) -> &str {
+        "correctness"
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {

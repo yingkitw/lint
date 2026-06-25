@@ -8,7 +8,7 @@ use ignore::Walk;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
@@ -75,6 +75,26 @@ impl Linter {
             language_rule_set: LanguageRuleSet::new(),
             cache,
         }
+    }
+
+    pub fn list_files(&self) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for path in &self.config.paths {
+            if path.is_file() && self.should_lint_file(path) && !self.is_ignored(path) {
+                files.push(path.to_path_buf());
+            } else if path.is_dir() {
+                for entry in Walk::new(path).flatten() {
+                    let entry_path = entry.path();
+                    if self.is_ignored(entry_path) {
+                        continue;
+                    }
+                    if entry_path.is_file() && self.should_lint_file(entry_path) {
+                        files.push(entry_path.to_path_buf());
+                    }
+                }
+            }
+        }
+        files
     }
 
     pub fn run(&self) -> Result<Vec<LintResult>> {

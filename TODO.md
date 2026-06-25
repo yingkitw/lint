@@ -67,22 +67,67 @@
 - [x] Snapshot tests for CLI output
   - **Status**: Added `test_json_output_snapshot` and `test_trailing_whitespace_exact_message` integration tests that assert exact expected output fields and values. Zero new dependencies.
 
+## Brainstorming (from competitive intelligence round 8)
+
+- [x] **`--exit-zero` CLI flag**
+  - Ruff supports `--exit-zero` to always exit with code 0 even if violations are found
+  - Useful for CI pipelines where you want to see lint output without failing the build
+  - **Goal**: `lint lint . --exit-zero` always returns 0
+  - **Status**: Added `exit_zero: bool` to `Commands::Lint`. Wired up in `run_lint_and_print` to return 0 regardless of errors or max-warnings exceeded. CLI parsing test added.
+
+- [x] **Show source context in text output**
+  - Ruff shows the offending source line with a caret underline in text output
+  - **Goal**: Text output includes the source line and a caret pointing to the column
+  - **Status**: Text output now shows the offending source line and a caret underline (`| ` + source + `| ` + `^` at column). Uses `result.file_content.lines()` to extract the source line. No new tests needed (existing tests use JSON/GitHub/SARIF output).
+
+- [x] **`--statistics` CLI flag**
+  - Ruff supports `--statistics` to show per-rule violation counts after linting
+  - **Goal**: `lint lint . --statistics` prints a sorted table of rule names and their violation counts
+  - **Status**: Added `statistics: bool` to `Commands::Lint`. `run_lint_and_print` collects per-rule counts from all results, sorts by count descending, and prints a summary table. CLI parsing test added.
+
+- [ ] **Rule categories / severity-based grouping**
+  - Ruff organizes rules into categories (E = errors, W = warnings, F = Pyflakes, etc.)
+  - **Goal**: Rules have category prefixes (e.g., `style:line-length`, `bug:no-todo`)
+
+## Brainstorming (from competitive intelligence round 7)
+
+- [x] **SARIF output format**
+  - Ruff and Biome support SARIF (Static Analysis Results Interchange Format) for CI integration
+  - GitHub and Azure DevOps can render SARIF artifacts directly in PRs
+  - **Goal**: `lint lint . --output sarif` produces SARIF JSON for upload to GitHub Advanced Security
+  - **Status**: Added `Sarif` variant to `OutputFormat`. `render_sarif()` generates valid SARIF 2.1.0 JSON with tool info, rules catalog, and results with locations. `--output sarif` wired up in CLI. CLI parsing test and rendering test added.
+
+- [x] **Stdin linting (`--stdin`, `--stdin-filename`)**
+  - ESLint supports `eslint --stdin --stdin-filename=myfile.js` for piping code
+  - Ruff supports `ruff check --stdin-filename myfile.py - < myfile.py`
+  - **Goal**: `echo "let x = 5;" | lint lint --stdin --stdin-filename test.rs`
+  - Useful for editor integrations (Vim, Emacs, VS Code)
+  - **Status**: Added `stdin: bool` and `stdin_filename: Option<String>` to `Commands::Lint`. When `--stdin` is set, content is read from stdin, written to a temp file with the extension from `--stdin-filename` (for language detection), and linted. `--stdin-filename` defaults to `.rs` extension. CLI parsing tests added.
+
+- [x] **Output to file (`--output-file`)**
+  - Ruff supports `--output-file results.json` to write output to a file instead of stdout
+  - **Goal**: `lint lint . --output json --output-file results.json`
+  - **Status**: Added `output_file: Option<PathBuf>` to `Commands::Lint`. Refactored `print_results` into `render_results` (returns `String`) and `print_results` (prints to stdout). `run_lint_and_print` writes rendered output to file when `--output-file` is set, disabling colors automatically. CLI parsing test added.
+
 ## Brainstorming (from competitive intelligence round 6)
 
-- [ ] **`--select` / `--ignore` rule filtering at CLI**
+- [x] **`--select` / `--ignore` rule filtering at CLI**
   - Ruff uses `--select E,W` and `--ignore E501` for fine-grained rule control
   - Our current `--rules` flag replaces the entire enabled set
   - **Goal**: `--select line-length` adds a rule; `--ignore no-todo` removes a rule from defaults
+  - **Status**: Added `select: Option<Vec<String>>` and `ignore: Option<Vec<String>>` to `Commands::Lint`. `--rules` still replaces the entire set. If `--rules` is not specified, `--select` appends to defaults and `--ignore` removes from defaults. Supports comma-delimited lists (e.g., `--select no-todo,no-console-log`). CLI parsing tests added.
 
-- [ ] **Config `extends` for shareable configs**
+- [x] **Config `extends` for shareable configs**
   - ESLint and Biome support extending other config files (`"extends": "./base.json"`)
   - Useful for monorepos and team-wide base configs
   - **Goal**: `{"extends": ".lint.base.json", "max_line_length": 120}` merges base + local
+  - **Status**: Added `extends: Option<String>` to `Config` and `ConfigBuilder`. `load_config_file()` recursively loads base configs and calls `merge_configs()`. Scalars are overridden by local, collections are merged (ignore_patterns concatenated and deduplicated, per_file_ignores and severity_overrides merged with local winning). Relative paths resolved against config file parent directory. Unit tests added.
 
-- [ ] **`--print-files` / `--list-files` CLI flag**
+- [x] **`--print-files` / `--list-files` CLI flag**
   - Oxlint added `--print-files` to list files that would be linted without actually linting them
   - Useful for debugging `ignore_patterns` and glob expansion
   - **Goal**: `lint lint . --print-files` prints one path per line, then exits
+  - **Status**: Added `print_files: bool` to `Commands::Lint`. `Linter::list_files()` method walks config paths, applies `is_ignored()` and `should_lint_file()` filters, and returns matching paths. `--print-files` prints paths and exits early before linting. CLI parsing test added.
 
 ## Brainstorming (from competitive intelligence round 5)
 
@@ -153,7 +198,9 @@
 
 ## Done
 
-- [x] Comprehensive unit and integration test coverage (114 lib + 20 bin + 18 advanced + 10 basic = 162 tests)
+- [x] Comprehensive unit and integration test coverage (114 lib + 35 bin + 18 advanced + 10 basic = 177 tests)
+- [x] Source context in text output (offending line + caret underline)
+- [x] `--statistics` CLI flag (per-rule violation counts)
 - [x] MCP server implementation
 - [x] Multi-language rule support
 - [x] `--fix` auto-fix capability (trailing whitespace)
@@ -173,5 +220,12 @@
 - [x] Rule severity override in config (`"severity_overrides": {"line-length": "Error"}`)
 - [x] `--quiet` / `--max-warnings` CLI flags
 - [x] `--color` CLI flag (`never`/`always`)
+- [x] `--select` / `--ignore` CLI flags (add/remove rules from defaults)
+- [x] `--print-files` CLI flag (list files that would be linted)
+- [x] `--output-file` CLI flag (write results to file)
+- [x] `--stdin` / `--stdin-filename` CLI flags (lint from stdin)
+- [x] SARIF output format (`--output sarif`)
+- [x] `--exit-zero` CLI flag (always return 0)
+- [x] Config `extends` for shareable configs
 - [x] Audit: removed unused dependencies (`glob`, `thiserror`) from `Cargo.toml`
 - [x] Audit: fixed all `cargo clippy` warnings (collapsed nested ifs, replaced `len()` comparisons with `is_empty()`, simplified `map_or`)

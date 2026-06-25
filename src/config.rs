@@ -12,6 +12,7 @@ pub struct Config {
     pub output_format: OutputFormat,
     pub per_file_ignores: HashMap<String, Vec<String>>,
     pub severity_overrides: HashMap<String, Severity>,
+    pub extends: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +27,7 @@ pub enum OutputFormat {
     Json,
     Markdown,
     Github,
+    Sarif,
 }
 
 pub struct ConfigBuilder {
@@ -36,6 +38,7 @@ pub struct ConfigBuilder {
     output_format: OutputFormat,
     per_file_ignores: HashMap<String, Vec<String>>,
     severity_overrides: HashMap<String, Severity>,
+    extends: Option<String>,
 }
 
 impl ConfigBuilder {
@@ -55,6 +58,7 @@ impl ConfigBuilder {
             output_format: OutputFormat::Text,
             per_file_ignores: HashMap::new(),
             severity_overrides: HashMap::new(),
+            extends: None,
         }
     }
 
@@ -98,6 +102,11 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn extends(mut self, path: Option<String>) -> Self {
+        self.extends = path;
+        self
+    }
+
     pub fn build(self) -> Config {
         Config {
             paths: self.paths,
@@ -107,6 +116,7 @@ impl ConfigBuilder {
             output_format: self.output_format,
             per_file_ignores: self.per_file_ignores,
             severity_overrides: self.severity_overrides,
+            extends: self.extends,
         }
     }
 }
@@ -196,6 +206,7 @@ mod tests {
             output_format: OutputFormat::Text,
             per_file_ignores,
             severity_overrides,
+            extends: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();

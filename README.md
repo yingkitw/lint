@@ -60,6 +60,30 @@ lint lint . --max-warnings 10
 # Disable colored output
 lint lint . --color never
 
+# Add a rule to the default set
+lint lint . --select no-todo
+
+# Remove a rule from the default set
+lint lint . --ignore line-length
+
+# List files that would be linted (without linting)
+lint lint . --print-files
+
+# Write JSON results to a file
+lint lint . --output json --output-file results.json
+
+# Generate SARIF output for GitHub Advanced Security
+lint lint . --output sarif --output-file results.sarif.json
+
+# Show violations without failing the build
+lint lint . --exit-zero
+
+# Show per-rule violation statistics
+lint lint . --statistics
+
+# Lint code from stdin (useful for editor integrations)
+echo 'let x = 5;   ' | lint lint --stdin --stdin-filename test.rs
+
 # List available rules
 lint list-rules
 
@@ -68,6 +92,22 @@ lint version
 ```
 
 **Exit codes**: `0` if no issues found, `1` if any errors detected or if warnings exceed `--max-warnings`.
+
+### Config Extends
+
+Share a base configuration across projects:
+
+```json
+{
+  "extends": ".lint.base.json",
+  "max_line_length": 120,
+  "rule_set": {
+    "enabled_rules": ["line-length", "trailing-whitespace", "no-todo"]
+  }
+}
+```
+
+Values in the local config override the base. Collections like `ignore_patterns`, `per_file_ignores`, and `severity_overrides` are merged.
 
 ### Unused Suppression Detection
 
