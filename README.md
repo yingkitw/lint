@@ -27,6 +27,9 @@ lint lint .
 # Lint specific files
 lint lint src/main.rs src/lib.rs
 
+# Use glob patterns
+lint lint "src/**/*.rs"
+
 # Specify output format (text, json, markdown)
 lint lint . --output json
 
@@ -42,6 +45,21 @@ lint lint . --config .lint.json
 # Auto-fix fixable issues
 lint lint . --fix
 
+# Watch for changes and re-lint
+lint lint . --watch
+
+# Use cache to skip unchanged files
+lint lint . --cache
+
+# Only show errors (suppress warnings and infos)
+lint lint . --quiet
+
+# Fail if more than 10 warnings
+lint lint . --max-warnings 10
+
+# Disable colored output
+lint lint . --color never
+
 # List available rules
 lint list-rules
 
@@ -49,7 +67,21 @@ lint list-rules
 lint version
 ```
 
-**Exit codes**: `0` if no issues found, `1` if any errors detected (warnings and infos do not affect the exit code).
+**Exit codes**: `0` if no issues found, `1` if any errors detected or if warnings exceed `--max-warnings`.
+
+### Unused Suppression Detection
+
+Enable the `unused-suppression` rule to detect suppression comments that don't actually suppress any violations (useful for cleanup after refactoring):
+
+```bash
+lint lint . --rules line-length,trailing-whitespace,unused-suppression
+```
+
+This reports warnings like:
+
+```
+Unused suppression comment: `lint: ignore=line-length`
+```
 
 ### MCP Server
 
@@ -216,6 +248,85 @@ Define your own rules in a JSON file:
 - `suggestion`: Optional fix hint
 - `extensions`: Optional list of file extensions to apply the rule to
 
+### Suppressing Rules Inline
+
+Suppress a rule on a specific line:
+
+```rust
+let x = 5; // lint: ignore=line-length
+```
+
+Suppress all rules on a line:
+
+```rust
+let x = 5; // lint: ignore
+```
+
+### Block Suppressions
+
+Disable a rule for a block of code:
+
+```rust
+// lint: disable=line-length
+const LONG_CONFIG: &str = "some very long configuration string that exceeds normal limits";
+// lint: enable=line-length
+```
+
+Disable all rules for a block:
+
+```rust
+// lint: disable
+const GENERATED_DATA: &str = "...generated content...";
+// lint: enable
+```
+
+### File-Level Ignore
+
+Ignore all rules for an entire file (must be on the first line):
+
+```rust
+// lint: ignore-file
+// This file is auto-generated
+const DATA: &str = "...";
+```
+
+Ignore a specific rule for the entire file:
+
+```rust
+// lint: ignore-file=line-length
+// Test files often have long lines
+```
+
+Works in any language — the suppression comment is language-agnostic.
+
+### Per-File Ignore Patterns
+
+Disable specific rules for files matching a glob pattern via config:
+
+```json
+{
+  "per_file_ignores": {
+    "tests/**/*.rs": ["line-length"],
+    "gen/**/*.js": ["line-length", "trailing-whitespace"]
+  }
+}
+```
+
+### Rule Severity Override
+
+Override the default severity of any rule in your config:
+
+```json
+{
+  "severity_overrides": {
+    "line-length": "Error",
+    "no-todo": "Warning"
+  }
+}
+```
+
+Valid severities: `Error`, `Warning`, `Info`.
+
 ## Supported File Extensions
 
 - **Rust**: `.rs`
@@ -244,6 +355,7 @@ Define your own rules in a JSON file:
 - **Text**: Human-readable output (default)
 - **Json**: Machine-readable JSON format
 - **Markdown**: Markdown-formatted output
+- **GitHub**: GitHub Actions workflow commands (`::error file=...::...`)
 
 ## Benchmarking
 
@@ -253,7 +365,7 @@ Run the built-in performance benchmark:
 cargo run --example bench
 ```
 
-This generates a 10,000-line file and measures linting throughput.
+This generates 100 files (500 lines each) and measures linting throughput. The linter processes multiple files in parallel using `rayon` for better performance on multi-core machines.
 
 ## Contributing
 

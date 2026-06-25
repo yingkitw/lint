@@ -150,10 +150,25 @@ fn test_output_format_variants() {
     let text_format = OutputFormat::Text;
     let json_format = OutputFormat::Json;
     let markdown_format = OutputFormat::Markdown;
+    let github_format = OutputFormat::Github;
 
     assert!(matches!(text_format, OutputFormat::Text));
     assert!(matches!(json_format, OutputFormat::Json));
     assert!(matches!(markdown_format, OutputFormat::Markdown));
+    assert!(matches!(github_format, OutputFormat::Github));
+}
+
+#[test]
+fn test_output_format_github_serialization_roundtrip() {
+    let config = ConfigBuilder::new()
+        .paths(vec![PathBuf::from("src")])
+        .output_format(OutputFormat::Github)
+        .build();
+    assert_eq!(config.output_format, OutputFormat::Github);
+
+    let json = serde_json::to_string(&config).unwrap();
+    let parsed: lint::Config = serde_json::from_str(&json).unwrap();
+    assert!(matches!(parsed.output_format, OutputFormat::Github));
 }
 
 #[test]

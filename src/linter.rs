@@ -1,20 +1,37 @@
+use crate::cache::Cache;
 use crate::config::Config;
 use crate::language_rules::LanguageRuleSet;
-use crate::output::LintResult;
+use crate::output::{LintMessage, LintResult, Severity};
 use crate::rules::{Rule, RuleSet};
 use anyhow::{Context, Result};
 use ignore::Walk;
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone)]
+struct SuppressionDirective {
+    start_line: usize,
+    end_line: usize,
+    rule: Option<String>,
+    is_block: bool,
+}
 
 pub struct Linter {
     config: Config,
     rule_set: RuleSet,
     language_rule_set: LanguageRuleSet,
+    cache: Option<Arc<Mutex<Cache>>>,
 }
 
 impl Linter {
     pub fn new(config: &Config) -> Self {
+        Self::new_with_cache(config, None)
+    }
+
+    pub fn new_with_cache(config: &Config, cache: Option<Arc<Mutex<Cache>>>) -> Self {
         let mut rule_set = RuleSet::new();
 
         let rules = vec![
@@ -56,15 +73,21 @@ impl Linter {
             config: config.clone(),
             rule_set,
             language_rule_set: LanguageRuleSet::new(),
+            cache,
         }
     }
 
-    pub fn run(&mut self) -> Result<Vec<LintResult>> {
-        let mut results = Vec::new();
+    pub fn run(&self) -> Result<Vec<LintResult>> {
+        let path_results: Vec<Result<Vec<LintResult>>> = self
+            .config
+            .paths
+            .par_iter()
+            .map(|path| self.lint_path(path))
+            .collect();
 
-        for path in &self.config.paths {
-            let path_results = self.lint_path(path)?;
-            results.extend(path_results);
+        let mut results = Vec::new();
+        for pr in path_results {
+            results.extend(pr?);
         }
 
         Ok(results)
@@ -123,12 +146,47 @@ impl Linter {
     }
 
     fn lint_file(&self, path: &Path) -> Result<LintResult> {
+        let metadata = fs::metadata(path);
+        let cache_key = metadata.as_ref().ok().and_then(|m| {
+            let mtime = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            let size = m.len();
+            Some((mtime, size))
+        });
+
+        if let Some((mtime, size)) = cache_key
+            && let Some(ref cache) = self.cache
+        {
+            let cache_guard = cache.lock().unwrap();
+            if let Some(cached_messages) = cache_guard.get(path, mtime, size) {
+                let mut result = LintResult::new(path.to_path_buf(), String::new());
+                result.messages = cached_messages.clone();
+                return Ok(result);
+            }
+        }
+
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
         let mut result = LintResult::new(path.to_path_buf(), content);
 
+        let file_level_ignored = Self::parse_file_level_ignore(&result.file_content);
+        if file_level_ignored.clone().is_some_and(|rules| rules.is_empty()) {
+            if let Some((mtime, size)) = cache_key
+                && let Some(ref cache) = self.cache
+            {
+                let mut cache_guard = cache.lock().unwrap();
+                cache_guard.insert(path.to_path_buf(), mtime, size, result.messages.clone());
+            }
+            return Ok(result);
+        }
+
         for rule in self.rule_set.get_rules() {
+            if file_level_ignored
+                .as_ref()
+                .is_some_and(|rules| rules.contains(&rule.name().to_string()))
+            {
+                continue;
+            }
             let messages = rule.check(&result.file_content, path);
             for message in messages {
                 result.add_message(message);
@@ -137,10 +195,238 @@ impl Linter {
 
         let language_messages = self.language_rule_set.check(&result.file_content, path);
         for message in language_messages {
+            if file_level_ignored
+                .as_ref()
+                .is_some_and(|rules| rules.contains(&message.rule))
+            {
+                continue;
+            }
             result.add_message(message);
         }
 
+        let lines: Vec<&str> = result.file_content.lines().collect();
+        let directives = Self::parse_suppression_directives(&lines);
+        let disabled_by_line = Self::parse_block_suppressions(&lines);
+
+        let raw_messages = result.messages.clone();
+        result.messages.retain(|msg| {
+            if let Some(line) = lines.get(msg.line.saturating_sub(1)) {
+                let inline_suppressed = Self::is_line_suppressed(line, &msg.rule);
+                let block_suppressed = disabled_by_line
+                    .get(&msg.line.saturating_sub(1))
+                    .is_some_and(|disabled| disabled.is_empty() || disabled.contains(&msg.rule));
+                !(inline_suppressed || block_suppressed)
+            } else {
+                true
+            }
+        });
+
+        if self.config.rule_set.enabled_rules.contains(&"unused-suppression".to_string()) {
+            for d in &directives {
+                let used = if d.is_block {
+                    raw_messages.iter().any(|msg| {
+                        let line_idx = msg.line.saturating_sub(1);
+                        line_idx >= d.start_line && line_idx < d.end_line
+                            && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
+                    })
+                } else {
+                    raw_messages.iter().any(|msg| {
+                        msg.line.saturating_sub(1) == d.start_line
+                            && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
+                    })
+                };
+                if !used {
+                    let message = if let Some(ref rule) = d.rule {
+                        format!("Unused suppression comment: `lint: ignore={}`", rule)
+                    } else {
+                        "Unused suppression comment: `lint: ignore`".to_string()
+                    };
+                    result.add_message(LintMessage::new(
+                        d.start_line + 1,
+                        1,
+                        Severity::Warning,
+                        message,
+                        "unused-suppression".to_string(),
+                        Some("Remove this suppression comment or fix the underlying issue.".to_string()),
+                    ));
+                }
+            }
+        }
+
+        if !self.config.per_file_ignores.is_empty() {
+            let path_str = path.to_string_lossy();
+            let mut ignored_rules: Vec<&str> = Vec::new();
+            for (pattern, rules) in &self.config.per_file_ignores {
+                if let Ok(glob_pattern) = glob::Pattern::new(pattern)
+                    && glob_pattern.matches(&path_str)
+                {
+                    ignored_rules.extend(rules.iter().map(|r| r.as_str()));
+                }
+            }
+            if !ignored_rules.is_empty() {
+                result.messages.retain(|msg| !ignored_rules.contains(&msg.rule.as_str()));
+            }
+        }
+
+        if !self.config.severity_overrides.is_empty() {
+            for msg in &mut result.messages {
+                if let Some(severity) = self.config.severity_overrides.get(&msg.rule) {
+                    msg.severity = *severity;
+                }
+            }
+        }
+
+        if let Some((mtime, size)) = cache_key
+            && let Some(ref cache) = self.cache
+        {
+            let mut cache_guard = cache.lock().unwrap();
+            cache_guard.insert(path.to_path_buf(), mtime, size, result.messages.clone());
+        }
+
         Ok(result)
+    }
+
+    fn is_line_suppressed(line: &str, rule_name: &str) -> bool {
+        if let Some(pos) = line.find("lint: ignore") {
+            let after = &line[pos + "lint: ignore".len()..];
+            let after = after.trim_start();
+            if after.is_empty() {
+                return true;
+            }
+            if let Some(stripped) = after.strip_prefix('=') {
+                let suppressed = stripped.trim();
+                return suppressed == rule_name;
+            }
+        }
+        false
+    }
+
+    fn parse_block_suppressions(lines: &[&str]) -> HashMap<usize, HashSet<String>> {
+        let mut result = HashMap::new();
+        let mut all_disabled = false;
+        let mut disabled_rules: HashSet<String> = HashSet::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            if let Some(pos) = line.find("lint: disable") {
+                let after = &line[pos + "lint: disable".len()..];
+                let after = after.trim_start();
+                if after.is_empty() {
+                    all_disabled = true;
+                    disabled_rules.clear();
+                } else if let Some(stripped) = after.strip_prefix('=') {
+                    let rule = stripped.trim().to_string();
+                    if !all_disabled {
+                        disabled_rules.insert(rule);
+                    }
+                }
+            } else if let Some(pos) = line.find("lint: enable") {
+                let after = &line[pos + "lint: enable".len()..];
+                let after = after.trim_start();
+                if after.is_empty() {
+                    all_disabled = false;
+                    disabled_rules.clear();
+                } else if let Some(stripped) = after.strip_prefix('=') {
+                    let rule = stripped.trim().to_string();
+                    if !all_disabled {
+                        disabled_rules.remove(&rule);
+                    }
+                }
+            }
+
+            if all_disabled {
+                let _ = result.insert(i, HashSet::new());
+            } else if !disabled_rules.is_empty() {
+                let _ = result.insert(i, disabled_rules.clone());
+            }
+        }
+
+        result
+    }
+
+    fn parse_file_level_ignore(content: &str) -> Option<Vec<String>> {
+        let first_line = content.lines().next()?;
+        let pos = first_line.find("lint: ignore-file")?;
+        let after = &first_line[pos + "lint: ignore-file".len()..];
+        let after = after.trim_start();
+        if after.is_empty() {
+            return Some(Vec::new());
+        }
+        if let Some(stripped) = after.strip_prefix('=') {
+            let rule = stripped.trim().to_string();
+            return Some(vec![rule]);
+        }
+        None
+    }
+
+    fn parse_suppression_directives(lines: &[&str]) -> Vec<SuppressionDirective> {
+        let mut directives = Vec::new();
+        let mut block_stack: Vec<(usize, Option<String>)> = Vec::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            if let Some(pos) = line.find("lint: ignore") {
+                let after = &line[pos + "lint: ignore".len()..];
+                let after = after.trim_start();
+                let rule = if after.is_empty() {
+                    None
+                } else if let Some(stripped) = after.strip_prefix('=') {
+                    Some(stripped.trim().to_string())
+                } else {
+                    continue;
+                };
+                directives.push(SuppressionDirective {
+                    start_line: i,
+                    end_line: i + 1,
+                    rule,
+                    is_block: false,
+                });
+            } else if let Some(pos) = line.find("lint: disable") {
+                let after = &line[pos + "lint: disable".len()..];
+                let after = after.trim_start();
+                let rule = if after.is_empty() {
+                    None
+                } else if let Some(stripped) = after.strip_prefix('=') {
+                    Some(stripped.trim().to_string())
+                } else {
+                    continue;
+                };
+                block_stack.push((i, rule));
+            } else if let Some(pos) = line.find("lint: enable") {
+                let after = &line[pos + "lint: enable".len()..];
+                let after = after.trim_start();
+                if after.is_empty() {
+                    while let Some((start, _)) = block_stack.pop() {
+                        directives.push(SuppressionDirective {
+                            start_line: start,
+                            end_line: i,
+                            rule: None,
+                            is_block: true,
+                        });
+                    }
+                } else if let Some(stripped) = after.strip_prefix('=') {
+                    let rule_name = stripped.trim().to_string();
+                    if let Some(pos) = block_stack.iter().rposition(|(_, r)| r.as_ref() == Some(&rule_name)) {
+                        let (start, _) = block_stack.remove(pos);
+                        directives.push(SuppressionDirective {
+                            start_line: start,
+                            end_line: i,
+                            rule: Some(rule_name),
+                            is_block: true,
+                        });
+                    }
+                }
+            }
+        }
+
+        while let Some((start, rule)) = block_stack.pop() {
+            directives.push(SuppressionDirective {
+                start_line: start,
+                end_line: lines.len(),
+                rule,
+                is_block: true,
+            });
+        }
+
+        directives
     }
 
     fn should_lint_file(&self, path: &Path) -> bool {
@@ -299,6 +585,397 @@ mod tests {
         assert_eq!(result.file_path, file.path());
         assert!(!result.messages.is_empty());
         assert!(result.has_warnings());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_suppression_specific_rule() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "let x = 5;   // lint: ignore=trailing-whitespace\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(result.messages.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_suppression_all_rules() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "let very_long_line_that_exceeds_the_default_maximum_length_of_one_hundred_characters = 42; // lint: ignore\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .max_line_length(Some(50))
+            .enabled_rules(vec!["line-length".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(result.messages.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_suppression_only_affects_own_line() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "let x = 5;   // lint: ignore=trailing-whitespace\nlet y = 10;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].line, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_line_suppressed_unit() {
+        assert!(Linter::is_line_suppressed("let x = 5; // lint: ignore=line-length", "line-length"));
+        assert!(!Linter::is_line_suppressed("let x = 5; // lint: ignore=trailing-whitespace", "line-length"));
+        assert!(Linter::is_line_suppressed("let x = 5; // lint: ignore", "any-rule"));
+        assert!(!Linter::is_line_suppressed("let x = 5;", "line-length"));
+    }
+
+    #[test]
+    fn test_per_file_ignore_filters_rule() -> anyhow::Result<()> {
+        use std::collections::HashMap;
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "let x = 5;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let mut per_file_ignores = HashMap::new();
+        per_file_ignores.insert("*.rs".to_string(), vec!["trailing-whitespace".to_string()]);
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .per_file_ignores(per_file_ignores)
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(result.messages.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_per_file_ignore_does_not_affect_other_files() -> anyhow::Result<()> {
+        use std::collections::HashMap;
+        let mut file = NamedTempFile::new()?;
+        let content = "let x = 5;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let mut per_file_ignores = HashMap::new();
+        per_file_ignores.insert("*.py".to_string(), vec!["trailing-whitespace".to_string()]);
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .per_file_ignores(per_file_ignores)
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(!result.messages.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_severity_override_changes_severity() -> anyhow::Result<()> {
+        use std::collections::HashMap;
+        use crate::output::Severity;
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "let x = 5;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let mut overrides = HashMap::new();
+        overrides.insert("trailing-whitespace".to_string(), Severity::Error);
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .severity_overrides(overrides)
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].severity, Severity::Error);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_severity_override_only_affects_matching_rule() -> anyhow::Result<()> {
+        use std::collections::HashMap;
+        use crate::output::Severity;
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "let x = 5;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let mut overrides = HashMap::new();
+        overrides.insert("line-length".to_string(), Severity::Error);
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .severity_overrides(overrides)
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].severity, Severity::Warning);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_suppression_disable_enable_rule() -> anyhow::Result<()> {
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "let x = 5;   \n// lint: disable=trailing-whitespace\nlet y = 10;   \nlet z = 20;   \n// lint: enable=trailing-whitespace\nlet w = 30;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        let lines: Vec<_> = result.messages.iter().map(|m| m.line).collect();
+        assert!(lines.contains(&1));
+        assert!(!lines.contains(&3));
+        assert!(!lines.contains(&4));
+        assert!(lines.contains(&6));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_suppression_disable_all_enable_all() -> anyhow::Result<()> {
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "let x = 5;   \n// lint: disable\nlet y = 10;   \nlet z = 20;   \n// lint: enable\nlet w = 30;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        let lines: Vec<_> = result.messages.iter().map(|m| m.line).collect();
+        assert!(lines.contains(&1));
+        assert!(!lines.contains(&3));
+        assert!(!lines.contains(&4));
+        assert!(lines.contains(&6));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_suppression_with_inline_ignore() -> anyhow::Result<()> {
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "// lint: disable=trailing-whitespace\nlet x = 5;   // lint: ignore=trailing-whitespace\nlet y = 10;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        let tw_messages: Vec<_> = result
+            .messages
+            .iter()
+            .filter(|m| m.rule == "trailing-whitespace")
+            .collect();
+        assert!(tw_messages.is_empty(), "trailing-whitespace should be fully suppressed");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_level_ignore_all_rules() -> anyhow::Result<()> {
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "// lint: ignore-file\nlet x = 5;   \nlet y = 10;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(result.messages.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_level_ignore_specific_rule() -> anyhow::Result<()> {
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "// lint: ignore-file=trailing-whitespace\nlet x = 5;   \nTODO: fix this\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string(), "no-todo".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(result.messages.iter().all(|m| m.rule != "trailing-whitespace"));
+        assert!(result.messages.iter().any(|m| m.rule == "no-todo"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_level_ignore_not_on_first_line_is_ignored() -> anyhow::Result<()> {
+        let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
+        let content = "let x = 5;   \n// lint: ignore-file\nlet y = 10;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(!result.messages.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unused_inline_suppression_detected() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "let x = 5; // lint: ignore=trailing-whitespace\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string(), "unused-suppression".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].rule, "unused-suppression");
+        assert!(result.messages[0].message.contains("trailing-whitespace"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_used_inline_suppression_not_reported() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "let x = 5; // lint: ignore=trailing-whitespace   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string(), "unused-suppression".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(result.messages.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unused_block_suppression_detected() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "// lint: disable=trailing-whitespace\nlet x = 5;\n// lint: enable=trailing-whitespace\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string(), "unused-suppression".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].rule, "unused-suppression");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_used_block_suppression_not_reported() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "// lint: disable=trailing-whitespace\nlet x = 5;   \n// lint: enable=trailing-whitespace\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string(), "unused-suppression".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+
+        assert!(result.messages.is_empty());
 
         Ok(())
     }
