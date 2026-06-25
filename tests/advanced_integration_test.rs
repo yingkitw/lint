@@ -164,7 +164,7 @@ fn test_multiple_files_linting() {
         .build();
 
     let results = lint::lint_files(&config).unwrap();
-    assert!(results.len() >= 1);
+    assert!(!results.is_empty());
 }
 
 #[test]
@@ -256,6 +256,61 @@ fn test_lint_shell_file() -> anyhow::Result<()> {
     let results = lint::lint_files(&config).unwrap();
     assert_eq!(results.len(), 1);
     assert!(results[0].messages.iter().any(|m| m.rule == "shell-echo-quote"));
+
+    Ok(())
+}
+
+#[test]
+fn test_lint_respects_ignore_patterns() -> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let root = temp_dir.path();
+
+    std::fs::create_dir_all(root.join("src"))?;
+    std::fs::create_dir_all(root.join("node_modules").join("pkg"))?;
+
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n")?;
+    std::fs::write(
+        root.join("node_modules/pkg/index.js"),
+        "console.log('hello');\n",
+    )?;
+
+    let config = ConfigBuilder::new()
+        .paths(vec![root.to_path_buf()])
+        .ignore_patterns(vec!["node_modules".to_string()])
+        .enabled_rules(vec![])
+        .build();
+
+    let results = lint::lint_files(&config)?;
+
+    let paths: Vec<_> = results.iter().map(|r| r.file_path.clone()).collect();
+    assert!(paths.iter().any(|p| p.ends_with("src/main.rs")));
+    assert!(!paths.iter().any(|p| p.to_string_lossy().contains("node_modules")));
+
+    Ok(())
+}
+
+#[test]
+fn test_lint_detects_errors_with_custom_rule() -> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let custom_rules_path = temp_dir.path().join("rules.json");
+    std::fs::write(
+        &custom_rules_path,
+        r#"[{"name": "no-danger","pattern": "danger","message": "Dangerous code","severity": "Error","suggestion": "Remove it","extensions": ["js"]}]"#,
+    )?;
+
+    let test_file = temp_dir.path().join("test.js");
+    std::fs::write(&test_file, "danger();\n")?;
+
+    let config = ConfigBuilder::new()
+        .paths(vec![test_file.clone()])
+        .custom_rules(Some(custom_rules_path))
+        .enabled_rules(vec!["no-danger".to_string()])
+        .build();
+
+    let results = lint::lint_files(&config)?;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].has_errors());
+    assert_eq!(results[0].messages[0].severity, lint::Severity::Error);
 
     Ok(())
 }

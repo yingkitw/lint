@@ -36,12 +36,20 @@ lint lint . --max-line-length 120
 # Enable specific rules
 lint lint . -r line-length -r trailing-whitespace
 
+# Use a configuration file
+lint lint . --config .lint.json
+
+# Auto-fix fixable issues
+lint lint . --fix
+
 # List available rules
 lint list-rules
 
 # Show version
 lint version
 ```
+
+**Exit codes**: `0` if no issues found, `1` if any errors detected (warnings and infos do not affect the exit code).
 
 ### MCP Server
 
@@ -184,6 +192,30 @@ let config = ConfigBuilder::new()
     .build();
 ```
 
+### Custom Rules
+
+Define your own rules in a JSON file:
+
+```json
+[
+  {
+    "name": "no-debugger",
+    "pattern": "\\bdebugger\\b",
+    "message": "Debugger statement found",
+    "severity": "Error",
+    "suggestion": "Remove debugger before committing",
+    "extensions": ["js", "ts"]
+  }
+]
+```
+
+- `name`: Unique rule identifier
+- `pattern`: Regular expression to match
+- `message`: Error/warning message
+- `severity`: `Error`, `Warning`, or `Info`
+- `suggestion`: Optional fix hint
+- `extensions`: Optional list of file extensions to apply the rule to
+
 ## Supported File Extensions
 
 - **Rust**: `.rs`
@@ -212,6 +244,16 @@ let config = ConfigBuilder::new()
 - **Text**: Human-readable output (default)
 - **Json**: Machine-readable JSON format
 - **Markdown**: Markdown-formatted output
+
+## Benchmarking
+
+Run the built-in performance benchmark:
+
+```bash
+cargo run --example bench
+```
+
+This generates a 10,000-line file and measures linting throughput.
 
 ## Contributing
 

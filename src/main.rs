@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use lint::{ConfigBuilder, OutputFormat};
+use lint::{Config, ConfigBuilder, OutputFormat};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -28,9 +28,20 @@ enum Commands {
 
         #[arg(short = 'r', long)]
         rules: Option<Vec<String>>,
+
+        #[arg(long)]
+        fix: bool,
     },
     ListRules,
     Version,
+}
+
+fn load_config_file(path: &PathBuf) -> anyhow::Result<Config> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
+    let config: Config = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e))?;
+    Ok(config)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -42,28 +53,51 @@ fn main() -> anyhow::Result<()> {
             output,
             max_line_length,
             rules,
+            fix,
         } => {
-            let mut builder = ConfigBuilder::new().paths(paths);
+            let mut config = if let Some(config_path) = &cli.config {
+                load_config_file(config_path)?
+            } else {
+                ConfigBuilder::new().build()
+            };
+
+            config.paths = paths;
 
             if let Some(length) = max_line_length {
-                builder = builder.max_line_length(Some(length));
+                config.max_line_length = Some(length);
             }
 
             if let Some(rules) = rules {
-                builder = builder.enabled_rules(rules);
+                config.rule_set.enabled_rules = rules;
             }
 
             let output_format = match output.as_deref() {
                 Some("json") => OutputFormat::Json,
                 Some("markdown") => OutputFormat::Markdown,
-                _ => OutputFormat::Text,
+                _ => config.output_format.clone(),
             };
-            builder = builder.output_format(output_format.clone());
+            config.output_format = output_format.clone();
 
-            let config = builder.build();
-            let results = lint::lint_files(&config)?;
+            let mut results = lint::lint_files(&config)?;
+
+            if fix {
+                let mut fixed_count = 0;
+                for result in &mut results {
+                    if result.apply_fixes() {
+                        std::fs::write(&result.file_path, &result.file_content)?;
+                        fixed_count += 1;
+                    }
+                }
+                if fixed_count > 0 {
+                    println!("Fixed {} file(s)", fixed_count);
+                }
+            }
 
             print_results(&results, output_format);
+
+            if results.iter().any(|r| r.has_errors()) {
+                std::process::exit(1);
+            }
         }
         Commands::ListRules => {
             list_rules();
@@ -179,4 +213,119 @@ fn list_rules() {
     println!("  Zig:     no-zig-debug-print");
     println!("  HTML:    html-no-inline-style, html-img-alt");
     println!("  CSS:     css-avoid-important");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_load_config_file_success() -> anyhow::Result<()> {
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        let config_json = r#"{
+            "paths": ["src"],
+            "ignore_patterns": ["target"],
+            "max_line_length": 120,
+            "rule_set": {
+                "enabled_rules": ["line-length"],
+                "custom_rules_path": null
+            },
+            "output_format": "Json"
+        }"#;
+        temp_file.write_all(config_json.as_bytes())?;
+        temp_file.flush()?;
+
+        let config = load_config_file(&temp_file.path().to_path_buf())?;
+        assert_eq!(config.paths, vec![PathBuf::from("src")]);
+        assert_eq!(config.max_line_length, Some(120));
+        assert_eq!(config.rule_set.enabled_rules, vec!["line-length".to_string()]);
+        assert_eq!(config.output_format, OutputFormat::Json);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_config_file_not_found() {
+        let result = load_config_file(&PathBuf::from("nonexistent_config.json"));
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Failed to read config file"));
+    }
+
+    #[test]
+    fn test_load_config_file_invalid_json() -> anyhow::Result<()> {
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        temp_file.write_all(b"not json")?;
+        temp_file.flush()?;
+
+        let result = load_config_file(&temp_file.path().to_path_buf());
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Failed to parse config file"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cli_lint_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--output", "json"]);
+        match cli.command {
+            Commands::Lint {
+                paths,
+                output,
+                max_line_length,
+                rules,
+                fix,
+            } => {
+                assert_eq!(paths, vec![PathBuf::from("src/")]);
+                assert_eq!(output, Some("json".to_string()));
+                assert_eq!(max_line_length, None);
+                assert_eq!(rules, None);
+                assert!(!fix);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_lint_parsing_with_config() {
+        let cli = Cli::parse_from(["lint", "--config", ".lint.json", "lint", "src/"]);
+        assert_eq!(cli.config, Some(PathBuf::from(".lint.json")));
+        match cli.command {
+            Commands::Lint { paths, .. } => {
+                assert_eq!(paths, vec![PathBuf::from("src/")]);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_list_rules_parsing() {
+        let cli = Cli::parse_from(["lint", "list-rules"]);
+        match cli.command {
+            Commands::ListRules => {}
+            _ => panic!("Expected ListRules command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_version_parsing() {
+        let cli = Cli::parse_from(["lint", "version"]);
+        match cli.command {
+            Commands::Version => {}
+            _ => panic!("Expected Version command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_fix_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--fix"]);
+        match cli.command {
+            Commands::Lint { fix, .. } => {
+                assert!(fix);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
 }

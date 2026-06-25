@@ -9,6 +9,12 @@ pub struct LintResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Fix {
+    pub line: usize,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LintMessage {
     pub line: usize,
     pub column: usize,
@@ -16,6 +22,7 @@ pub struct LintMessage {
     pub message: String,
     pub rule: String,
     pub suggestion: Option<String>,
+    pub fix: Option<Fix>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,12 +42,6 @@ impl Severity {
     }
 }
 
-pub enum Format {
-    Text,
-    Json,
-    Markdown,
-}
-
 impl LintMessage {
     pub fn new(
         line: usize,
@@ -57,7 +58,16 @@ impl LintMessage {
             message,
             rule,
             suggestion,
+            fix: None,
         }
+    }
+
+    pub fn with_fix(mut self, replacement: String) -> Self {
+        self.fix = Some(Fix {
+            line: self.line,
+            replacement,
+        });
+        self
     }
 }
 
@@ -82,6 +92,39 @@ impl LintResult {
         self.messages
             .iter()
             .any(|m| m.severity == Severity::Warning)
+    }
+
+    pub fn apply_fixes(&mut self) -> bool {
+        let mut fixes: Vec<_> = self
+            .messages
+            .iter()
+            .filter_map(|m| m.fix.as_ref())
+            .cloned()
+            .collect();
+
+        if fixes.is_empty() {
+            return false;
+        }
+
+        fixes.sort_by_key(|f| f.line);
+        fixes.reverse();
+
+        let mut lines: Vec<String> = self.file_content.lines().map(String::from).collect();
+
+        for fix in fixes {
+            if fix.line > 0 && fix.line <= lines.len() {
+                lines[fix.line - 1] = fix.replacement;
+            }
+        }
+
+        self.file_content = lines.join("\n");
+        if self.file_content.ends_with('\n') || self.file_content.is_empty() {
+            // Preserve trailing newline if original had one
+        } else if !self.file_content.is_empty() {
+            self.file_content.push('\n');
+        }
+
+        true
     }
 }
 
@@ -242,5 +285,64 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("test.rs"));
         assert!(json.contains("Test error"));
+    }
+
+    #[test]
+    fn test_apply_fixes_trailing_whitespace() {
+        let mut result = LintResult::new(
+            PathBuf::from("test.rs"),
+            "let x = 5;   \nlet y = 10;\n".to_string(),
+        );
+
+        result.add_message(
+            LintMessage::new(
+                1,
+                10,
+                Severity::Warning,
+                "Trailing whitespace".to_string(),
+                "trailing-whitespace".to_string(),
+                None,
+            )
+            .with_fix("let x = 5;".to_string()),
+        );
+
+        assert!(result.apply_fixes());
+        assert_eq!(result.file_content, "let x = 5;\nlet y = 10;\n");
+    }
+
+    #[test]
+    fn test_apply_fixes_no_fixes() {
+        let mut result = LintResult::new(
+            PathBuf::from("test.rs"),
+            "let x = 5;\n".to_string(),
+        );
+
+        result.add_message(LintMessage::new(
+            1,
+            1,
+            Severity::Warning,
+            "Some warning".to_string(),
+            "test-rule".to_string(),
+            None,
+        ));
+
+        assert!(!result.apply_fixes());
+        assert_eq!(result.file_content, "let x = 5;\n");
+    }
+
+    #[test]
+    fn test_with_fix_chains() {
+        let message = LintMessage::new(
+            1,
+            10,
+            Severity::Warning,
+            "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(),
+            Some("Remove trailing spaces".to_string()),
+        )
+        .with_fix("fixed line".to_string());
+
+        assert!(message.fix.is_some());
+        assert_eq!(message.fix.unwrap().replacement, "fixed line");
     }
 }

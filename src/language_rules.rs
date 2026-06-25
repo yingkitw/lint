@@ -688,18 +688,20 @@ impl LanguageRule for ShellEchoRule {
 
         for (line_num, line) in content.lines().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("echo ") && !trimmed.starts_with("echo \"") && !trimmed.starts_with("echo '")
+            if trimmed.starts_with("echo ")
+                && !trimmed.starts_with("echo \"")
+                && !trimmed.starts_with("echo '")
+                && trimmed.contains('$')
+                && !trimmed.contains('"')
             {
-                if trimmed.contains('$') && !trimmed.contains('"') {
-                    messages.push(LintMessage::new(
-                        line_num + 1,
-                        line.find("echo").unwrap_or(0),
-                        Severity::Warning,
-                        "Unquoted variable in echo".to_string(),
-                        self.name().to_string(),
-                        Some("Quote variables: 'echo $VAR' → 'echo \"$VAR\"' to prevent word splitting".to_string()),
-                    ));
-                }
+                messages.push(LintMessage::new(
+                    line_num + 1,
+                    line.find("echo").unwrap_or(0),
+                    Severity::Warning,
+                    "Unquoted variable in echo".to_string(),
+                    self.name().to_string(),
+                    Some("Quote variables: 'echo $VAR' → 'echo \"$VAR\"' to prevent word splitting".to_string()),
+                ));
             }
         }
 
@@ -1276,7 +1278,7 @@ mod tests {
         let rule_set = LanguageRuleSet::new();
         let content = "Console.WriteLine(\"hello\");\nclass badClass {}";
         let messages = rule_set.check(content, Path::new("test.cs"));
-        assert!(messages.len() >= 1);
+        assert!(!messages.is_empty());
     }
 
     #[test]

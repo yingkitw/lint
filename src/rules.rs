@@ -1,10 +1,77 @@
 use crate::output::{LintMessage, Severity};
 use regex::Regex;
+use serde::Deserialize;
 use std::path::Path;
 
 pub trait Rule: Send + Sync {
     fn name(&self) -> &str;
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomRuleDefinition {
+    pub name: String,
+    pub pattern: String,
+    pub message: String,
+    pub severity: String,
+    pub suggestion: Option<String>,
+    pub extensions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomRule {
+    definition: CustomRuleDefinition,
+    regex: Regex,
+}
+
+impl CustomRule {
+    pub fn from_definition(def: CustomRuleDefinition) -> Result<Self, regex::Error> {
+        let regex = Regex::new(&def.pattern)?;
+        Ok(Self {
+            definition: def,
+            regex,
+        })
+    }
+}
+
+impl Rule for CustomRule {
+    fn name(&self) -> &str {
+        &self.definition.name
+    }
+
+    fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage> {
+        if let Some(ref extensions) = self.definition.extensions {
+            let ext_matches = file_path.extension().is_some_and(|ext| {
+                let ext_str = ext.to_string_lossy();
+                extensions.iter().any(|e| e == ext_str.as_ref())
+            });
+            if !ext_matches {
+                return Vec::new();
+            }
+        }
+
+        let mut messages = Vec::new();
+        let severity = match self.definition.severity.as_str() {
+            "Error" => Severity::Error,
+            "Warning" => Severity::Warning,
+            _ => Severity::Info,
+        };
+
+        for (line_num, line) in content.lines().enumerate() {
+            if self.regex.is_match(line) {
+                messages.push(LintMessage::new(
+                    line_num + 1,
+                    0,
+                    severity,
+                    self.definition.message.clone(),
+                    self.definition.name.clone(),
+                    self.definition.suggestion.clone(),
+                ));
+            }
+        }
+
+        messages
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,14 +120,17 @@ impl Rule for TrailingWhitespaceRule {
 
         for (line_num, line) in content.lines().enumerate() {
             if line.ends_with(' ') || line.ends_with('\t') {
-                messages.push(LintMessage::new(
+                let trimmed = line.trim_end();
+                let message = LintMessage::new(
                     line_num + 1,
                     line.len(),
                     Severity::Warning,
                     "Trailing whitespace detected".to_string(),
                     self.name().to_string(),
                     Some("Delete spaces/tabs at end of line. In most editors: place cursor at line end and press Backspace until clean.".to_string()),
-                ));
+                )
+                .with_fix(trimmed.to_string());
+                messages.push(message);
             }
         }
 
@@ -125,7 +195,7 @@ impl Default for RuleSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn test_line_length_rule_short_line() {
@@ -239,5 +309,110 @@ mod tests {
     fn test_rule_set_default() {
         let rule_set = RuleSet::default();
         assert_eq!(rule_set.rules.len(), 0);
+    }
+
+    #[test]
+    fn test_custom_rule_matches() {
+        let def = CustomRuleDefinition {
+            name: "no-debugger".to_string(),
+            pattern: r"\bdebugger\b".to_string(),
+            message: "Debugger statement found".to_string(),
+            severity: "Warning".to_string(),
+            suggestion: Some("Remove debugger".to_string()),
+            extensions: None,
+        };
+        let rule = CustomRule::from_definition(def).unwrap();
+        let messages = rule.check("function foo() { debugger; }", Path::new("test.js"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].severity, Severity::Warning);
+        assert_eq!(messages[0].message, "Debugger statement found");
+    }
+
+    #[test]
+    fn test_custom_rule_respects_extensions() {
+        let def = CustomRuleDefinition {
+            name: "no-eval".to_string(),
+            pattern: r"\beval\(".to_string(),
+            message: "eval found".to_string(),
+            severity: "Error".to_string(),
+            suggestion: None,
+            extensions: Some(vec!["js".to_string()]),
+        };
+        let rule = CustomRule::from_definition(def).unwrap();
+        assert!(rule.check("eval(x)", Path::new("test.py")).is_empty());
+        assert!(!rule.check("eval(x)", Path::new("test.js")).is_empty());
+    }
+
+    #[test]
+    fn test_custom_rule_invalid_regex() {
+        let def = CustomRuleDefinition {
+            name: "bad".to_string(),
+            pattern: "[".to_string(),
+            message: "msg".to_string(),
+            severity: "Info".to_string(),
+            suggestion: None,
+            extensions: None,
+        };
+        assert!(CustomRule::from_definition(def).is_err());
+    }
+
+    #[test]
+    fn test_property_line_length_never_flags_short_lines() {
+        let rule = LineLengthRule { max_length: 100 };
+        for len in 1..=100 {
+            let line = "x".repeat(len);
+            let messages = rule.check(&line, Path::new("test.rs"));
+            assert!(messages.is_empty(), "Line of length {} should not be flagged", len);
+        }
+    }
+
+    #[test]
+    fn test_property_trailing_whitespace_never_flags_clean_lines() {
+        let rule = TrailingWhitespaceRule;
+        let clean_lines = [
+            "let x = 5;",
+            "fn main() {}",
+            "    println!(\"hello\");",
+            "",
+            "// comment",
+        ];
+        for line in clean_lines {
+            let messages = rule.check(line, Path::new("test.rs"));
+            assert!(messages.is_empty(), "Clean line should not be flagged: {}", line);
+        }
+    }
+
+    #[test]
+    fn test_property_no_todo_never_flags_clean_content() {
+        let rule = NoTodoRule;
+        let clean_contents = [
+            "let x = 5;\nlet y = 10;",
+            "// This is a normal comment\nfn main() {}",
+            "/* multi-line\ncomment */",
+            "",
+        ];
+        for content in clean_contents {
+            let messages = rule.check(content, Path::new("test.rs"));
+            assert!(messages.is_empty(), "Clean content should not be flagged: {}", content);
+        }
+    }
+
+    #[test]
+    fn test_property_fix_never_increases_file_size() {
+        let content = "line one   \nline two\t\nline three\n";
+        let mut result = crate::output::LintResult::new(
+            PathBuf::from("test.rs"),
+            content.to_string(),
+        );
+        let rule = TrailingWhitespaceRule;
+        for msg in rule.check(content, Path::new("test.rs")) {
+            result.add_message(msg);
+        }
+        let original_len = result.file_content.len();
+        result.apply_fixes();
+        assert!(
+            result.file_content.len() <= original_len,
+            "Fix should not increase file size"
+        );
     }
 }

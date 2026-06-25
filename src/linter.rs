@@ -35,6 +35,23 @@ impl Linter {
             }
         }
 
+        if let Some(ref custom_path) = config.rule_set.custom_rules_path
+            && let Ok(content) = fs::read_to_string(custom_path)
+            && let Ok(definitions) =
+                serde_json::from_str::<Vec<crate::rules::CustomRuleDefinition>>(&content)
+        {
+            for def in definitions {
+                if let Ok(rule) = crate::rules::CustomRule::from_definition(def)
+                    && config
+                        .rule_set
+                        .enabled_rules
+                        .contains(&rule.name().to_string())
+                {
+                    rule_set = rule_set.add_rule(Box::new(rule));
+                }
+            }
+        }
+
         Self {
             config: config.clone(),
             rule_set,
@@ -74,6 +91,9 @@ impl Linter {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
+                    if self.is_ignored(path) {
+                        continue;
+                    }
                     if path.is_file() && self.should_lint_file(path)
                         && let Ok(result) = self.lint_file(path)
                     {
@@ -87,6 +107,19 @@ impl Linter {
         }
 
         Ok(results)
+    }
+
+    fn is_ignored(&self, path: &Path) -> bool {
+        for pattern in &self.config.ignore_patterns {
+            for component in path.components() {
+                if let Some(name) = component.as_os_str().to_str()
+                    && name == pattern
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn lint_file(&self, path: &Path) -> Result<LintResult> {
@@ -202,6 +235,26 @@ mod tests {
         let linter = Linter::new(&config);
         assert!(!linter.should_lint_file(Path::new("Makefile")));
         assert!(!linter.should_lint_file(Path::new(".gitignore")));
+    }
+
+    #[test]
+    fn test_is_ignored_exact_match() {
+        let config = ConfigBuilder::new()
+            .ignore_patterns(vec![
+                "node_modules".to_string(),
+                ".git".to_string(),
+            ])
+            .build();
+        let linter = Linter::new(&config);
+
+        assert!(linter.is_ignored(Path::new("node_modules/package.json")));
+        assert!(linter.is_ignored(Path::new("src/node_modules/package.json")));
+        assert!(linter.is_ignored(Path::new(".git/config")));
+        assert!(linter.is_ignored(Path::new("project/.git/HEAD")));
+
+        assert!(!linter.is_ignored(Path::new("src/main.rs")));
+        assert!(!linter.is_ignored(Path::new("lib/git.rs")));
+        assert!(!linter.is_ignored(Path::new("node_modules_info.txt")));
     }
 
     #[test]

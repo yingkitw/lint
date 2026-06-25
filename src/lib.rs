@@ -8,7 +8,7 @@ pub mod language_rules;
 pub use config::{Config, ConfigBuilder, OutputFormat};
 pub use linter::Linter;
 pub use rules::{Rule, RuleSet};
-pub use output::{LintResult, LintMessage, Format, Severity};
+pub use output::{LintResult, LintMessage, Severity};
 pub use mcp::McpServer;
 pub use language_rules::{LanguageRule, LanguageRuleSet};
 
