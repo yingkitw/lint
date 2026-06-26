@@ -26,6 +26,7 @@ pub struct Linter {
     language_rule_set: LanguageRuleSet,
     cache: Option<Arc<Mutex<Cache>>>,
     gitignore: Option<ignore::gitignore::Gitignore>,
+    ignore_names: std::collections::HashSet<String>,
 }
 
 impl Linter {
@@ -41,6 +42,8 @@ impl Linter {
             builder.add(".gitignore");
             builder.build().ok()
         };
+
+        let ignore_names: std::collections::HashSet<String> = config.ignore_patterns.iter().cloned().collect();
 
         let mut rule_set = RuleSet::new();
 
@@ -90,6 +93,7 @@ impl Linter {
             language_rule_set: LanguageRuleSet::new(),
             cache,
             gitignore,
+            ignore_names,
         }
     }
 
@@ -178,13 +182,11 @@ impl Linter {
     }
 
     fn is_ignored(&self, path: &Path) -> bool {
-        for pattern in &self.config.ignore_patterns {
-            for component in path.components() {
-                if let Some(name) = component.as_os_str().to_str()
-                    && name == pattern
-                {
-                    return true;
-                }
+        for component in path.components() {
+            if let Some(name) = component.as_os_str().to_str()
+                && self.ignore_names.contains(name)
+            {
+                return true;
             }
         }
         if let Some(ref gitignore) = self.gitignore {
@@ -218,8 +220,8 @@ impl Linter {
             Some((mtime, size))
         });
 
-        if !use_content_hash
-            && let Some((mtime, size)) = cache_key
+        // Fast path: check metadata-based cache first for both strategies
+        if let Some((mtime, size)) = cache_key
             && let Some(ref cache) = self.cache
         {
             let cache_guard = cache.lock().unwrap();
@@ -233,6 +235,7 @@ impl Linter {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
+        // Content-based fallback: if metadata changed but content didn't
         if use_content_hash
             && let Some(ref cache) = self.cache
         {
@@ -254,7 +257,7 @@ impl Linter {
         let mut result = LintResult::new(self.effective_path(path).to_path_buf(), content);
 
         let file_level_ignored = Self::parse_file_level_ignore(&result.file_content);
-        if file_level_ignored.clone().is_some_and(|rules| rules.is_empty()) {
+        if file_level_ignored.as_ref().is_some_and(|rules| rules.is_empty()) {
             if !use_content_hash {
                 if let Some((mtime, size)) = cache_key
                     && let Some(ref cache) = self.cache
@@ -307,7 +310,29 @@ impl Linter {
             let directives = Self::parse_suppression_directives(&lines);
             let disabled_by_line = Self::parse_block_suppressions(&lines);
 
-            let raw_messages = result.messages.clone();
+            let check_unused = self.config.rule_set.enabled_rules.contains(&"unused-suppression".to_string());
+            let mut unused_suppressions = Vec::new();
+
+            if check_unused {
+                for d in &directives {
+                    let used = if d.is_block {
+                        result.messages.iter().any(|msg| {
+                            let line_idx = msg.line.saturating_sub(1);
+                            line_idx >= d.start_line && line_idx < d.end_line
+                                && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
+                        })
+                    } else {
+                        result.messages.iter().any(|msg| {
+                            msg.line.saturating_sub(1) == d.start_line
+                                && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
+                        })
+                    };
+                    if !used {
+                        unused_suppressions.push(d);
+                    }
+                }
+            }
+
             result.messages.retain(|msg| {
                 if let Some(line) = lines.get(msg.line.saturating_sub(1)) {
                     let inline_suppressed = Self::is_line_suppressed(line, &msg.rule);
@@ -320,36 +345,20 @@ impl Linter {
                 }
             });
 
-            if self.config.rule_set.enabled_rules.contains(&"unused-suppression".to_string()) {
-                for d in &directives {
-                    let used = if d.is_block {
-                        raw_messages.iter().any(|msg| {
-                            let line_idx = msg.line.saturating_sub(1);
-                            line_idx >= d.start_line && line_idx < d.end_line
-                                && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
-                        })
-                    } else {
-                        raw_messages.iter().any(|msg| {
-                            msg.line.saturating_sub(1) == d.start_line
-                                && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
-                        })
-                    };
-                    if !used {
-                        let message = if let Some(ref rule) = d.rule {
-                            format!("Unused suppression comment: `lint: ignore={}`", rule)
-                        } else {
-                            "Unused suppression comment: `lint: ignore`".to_string()
-                        };
-                        result.add_message(LintMessage::new(
-                            d.start_line + 1,
-                            1,
-                            Severity::Warning,
-                            message,
-                            "unused-suppression".to_string(),
-                            Some("Remove this suppression comment or fix the underlying issue.".to_string()),
-                        ));
-                    }
-                }
+            for d in unused_suppressions {
+                let message = if let Some(ref rule) = d.rule {
+                    format!("Unused suppression comment: `lint: ignore={}`", rule)
+                } else {
+                    "Unused suppression comment: `lint: ignore`".to_string()
+                };
+                result.add_message(LintMessage::new(
+                    d.start_line + 1,
+                    1,
+                    Severity::Warning,
+                    message,
+                    "unused-suppression".to_string(),
+                    Some("Remove this suppression comment or fix the underlying issue.".to_string()),
+                ));
             }
         }
 

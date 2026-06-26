@@ -19,6 +19,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     #[command(alias = "check")]
     Lint {
@@ -248,7 +249,7 @@ fn run_lint_and_print(
     if effective_fix || opts.diff || opts.check {
         let mut fixed_count = 0;
         for result in &mut results {
-            let original = result.file_content.clone();
+            let original = if opts.diff { result.file_content.clone() } else { String::new() };
             if result.apply_fixes() {
                 fixed_count += 1;
                 fixed_files.push(result.file_path.display().to_string());
@@ -285,6 +286,9 @@ fn run_lint_and_print(
     if opts.add_noqa {
         let mut noqa_count = 0;
         for result in &mut results {
+            if result.messages.is_empty() {
+                continue;
+            }
             let mut lines: Vec<String> = result.file_content.lines().map(|s| s.to_string()).collect();
             let mut modified = false;
             for msg in &result.messages {
@@ -358,10 +362,10 @@ fn run_lint_and_print(
     }
 
     if opts.statistics && !opts.quiet && !opts.fix_only {
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for result in &results {
             for msg in &result.messages {
-                *counts.entry(msg.rule.clone()).or_insert(0) += 1;
+                *counts.entry(&msg.rule).or_insert(0) += 1;
             }
         }
         if !counts.is_empty() {
@@ -1142,19 +1146,19 @@ fn render_grouped(results: &[lint::LintResult]) -> String {
 fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bool, show_source: bool) -> String {
     match format {
         OutputFormat::Json => {
-            let filtered: Vec<_> = if quiet {
-                results
+            if quiet {
+                let filtered: Vec<_> = results
                     .iter()
                     .map(|r| {
                         let mut cr = r.clone();
                         cr.messages.retain(|m| m.severity == lint::Severity::Error);
                         cr
                     })
-                    .collect()
+                    .collect();
+                serde_json::to_string_pretty(&filtered).unwrap()
             } else {
-                results.to_vec()
-            };
-            serde_json::to_string_pretty(&filtered).unwrap()
+                serde_json::to_string_pretty(results).unwrap()
+            }
         }
         OutputFormat::Markdown => {
             let mut out = String::new();
@@ -1222,6 +1226,7 @@ fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bo
                     }
                 } else {
                     out.push_str(&format!("{}\n", format!("{}", result.file_path.display()).bold()));
+                    let lines: Vec<&str> = result.file_content.lines().collect();
                     for msg in relevant {
                         let (prefix, color) = match msg.severity {
                             lint::Severity::Error => {
@@ -1248,8 +1253,8 @@ fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bo
                             msg.message
                         ));
 
+                        #[allow(clippy::collapsible_if)]
                         if show_source {
-                            let lines: Vec<&str> = result.file_content.lines().collect();
                             if let Some(source_line) = lines.get(msg.line.saturating_sub(1)) {
                                 out.push_str(&format!("    | {}\n", source_line));
                                 let caret = format!("    |{}^", " ".repeat(msg.column.saturating_sub(1)));
