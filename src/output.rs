@@ -102,23 +102,22 @@ impl LintResult {
     }
 
     pub fn apply_fixes(&mut self) -> bool {
-        let mut fixes: Vec<_> = self
-            .messages
-            .iter()
-            .filter_map(|m| m.fix.as_ref())
-            .cloned()
-            .collect();
-
-        if fixes.is_empty() {
+        let has_fixes = self.messages.iter().any(|m| m.fix.is_some());
+        if !has_fixes {
             return false;
         }
 
         // Full-content fixes (line == 0) replace the entire file content
-        let full_content_fixes: Vec<_> = fixes.iter().filter(|f| f.line == 0).cloned().collect();
-        if !full_content_fixes.is_empty() {
-            self.file_content = full_content_fixes[0].replacement.clone();
+        if let Some(fix) = self.messages.iter().find_map(|m| m.fix.as_ref().filter(|f| f.line == 0)) {
+            self.file_content = fix.replacement.clone();
             return true;
         }
+
+        let mut fixes: Vec<&Fix> = self
+            .messages
+            .iter()
+            .filter_map(|m| m.fix.as_ref())
+            .collect();
 
         fixes.sort_by_key(|f| f.line);
         fixes.reverse();
@@ -127,7 +126,7 @@ impl LintResult {
 
         for fix in fixes {
             if fix.line > 0 && fix.line <= lines.len() {
-                lines[fix.line - 1] = fix.replacement;
+                lines[fix.line - 1] = fix.replacement.clone();
             }
         }
 

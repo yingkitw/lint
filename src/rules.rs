@@ -157,7 +157,17 @@ impl Rule for TrailingWhitespaceRule {
 }
 
 #[derive(Debug, Clone)]
-pub struct NoTodoRule;
+pub struct NoTodoRule {
+    regex: Regex,
+}
+
+impl Default for NoTodoRule {
+    fn default() -> Self {
+        Self {
+            regex: Regex::new(r"(?i)\b(TODO|FIXME|HACK)\b").unwrap(),
+        }
+    }
+}
 
 impl Rule for NoTodoRule {
     fn name(&self) -> &str {
@@ -170,10 +180,9 @@ impl Rule for NoTodoRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let todo_pattern = Regex::new(r"(?i)\b(TODO|FIXME|HACK)\b").unwrap();
 
         for (line_num, line) in content.lines().enumerate() {
-            if todo_pattern.is_match(line) {
+            if self.regex.is_match(line) {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find(|c: char| c.is_ascii_alphanumeric()).unwrap_or(0),
@@ -438,7 +447,7 @@ mod tests {
     fn test_rule_categories() {
         let line_length = LineLengthRule { max_length: 100 };
         let trailing_ws = TrailingWhitespaceRule;
-        let no_todo = NoTodoRule;
+        let no_todo = NoTodoRule::default();
         assert_eq!(line_length.category(), "style");
         assert_eq!(trailing_ws.category(), "style");
         assert_eq!(no_todo.category(), "correctness");
@@ -511,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_no_todo_rule_clean() {
-        let rule = NoTodoRule;
+        let rule = NoTodoRule::default();
         let content = "let x = 5;\nlet y = 10;";
         let messages = rule.check(content, Path::new("test.rs"));
         assert!(messages.is_empty());
@@ -519,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_no_todo_rule_todo() {
-        let rule = NoTodoRule;
+        let rule = NoTodoRule::default();
         let content = "// TODO: implement this\nlet x = 5;";
         let messages = rule.check(content, Path::new("test.rs"));
         assert_eq!(messages.len(), 1);
@@ -529,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_no_todo_rule_fixme() {
-        let rule = NoTodoRule;
+        let rule = NoTodoRule::default();
         let content = "// FIXME: fix this bug";
         let messages = rule.check(content, Path::new("test.rs"));
         assert_eq!(messages.len(), 1);
@@ -538,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_no_todo_rule_case_insensitive() {
-        let rule = NoTodoRule;
+        let rule = NoTodoRule::default();
         let content = "// todo: implement this\n// TODO: implement this\n// FIXME: fix this";
         let messages = rule.check(content, Path::new("test.rs"));
         assert_eq!(messages.len(), 3);
@@ -631,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_property_no_todo_never_flags_clean_content() {
-        let rule = NoTodoRule;
+        let rule = NoTodoRule::default();
         let clean_contents = [
             "let x = 5;\nlet y = 10;",
             "// This is a normal comment\nfn main() {}",

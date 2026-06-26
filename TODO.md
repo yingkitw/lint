@@ -498,11 +498,11 @@
   - Very simple: add `line_length` to CLI with `visible_alias = "max-line-length"` or duplicate handler
   - **Status**: Added `visible_alias = "line-length"` to the `max_line_length` CLI argument via clap. `--line-length 120` now parses identically to `--max-line-length 120`. CLI parsing test added.
 
-- [ ] **`--no-gitignore` CLI flag**
+- [x] **`--no-gitignore` CLI flag**
   - Currently `.gitignore` files are always respected via the `ignore` crate's `WalkBuilder`
   - **Goal**: `--no-gitignore` disables automatic .gitignore respect
   - Useful when you want to lint generated files that are gitignored
-  - Requires threading a flag into `Linter::lint_directory()` or using `WalkBuilder::add_custom_ignore_filename()`
+  - **Status**: Added `no_gitignore: bool` to `Config`, `ConfigBuilder`, and `Commands::Lint`. `WalkBuilder::git_ignore()` toggled in `linter.rs`. `GitignoreBuilder` skipped when `no_gitignore` is true. CLI parsing and behavior tests added.
 
 - [x] **`--fixable` / `--unfixable` CLI flags**
   - Ruff supports `--fixable E,W` and `--unfixable I` to control which rules can be auto-fixed
@@ -525,11 +525,11 @@
   - Simple to implement: add `show_source: bool` to config, thread through `render_results()`
   - **Status**: Added `show_source: bool` to `Config` and `ConfigBuilder` with serde default `true`. Added `--no-show-source` CLI flag. Threaded `show_source` through `render_results()` and `print_results()`; source context and caret underline are conditionally rendered in `OutputFormat::Text`. `merge_configs()` uses AND logic (both must be true to show source). CLI parsing test added.
 
-- [ ] **`--no-gitignore` CLI flag**
+- [x] **`--no-gitignore` CLI flag**
   - Currently `.gitignore` files are always respected via the `ignore` crate's `WalkBuilder`
   - **Goal**: `--no-gitignore` disables automatic .gitignore respect
   - Useful when you want to lint generated files that are gitignored
-  - Requires threading a flag into `Linter::lint_directory()` or using `WalkBuilder::add_custom_ignore_filename()`
+  - **Status**: Added `no_gitignore: bool` to `Config`, `ConfigBuilder`, and `Commands::Lint`. `WalkBuilder::git_ignore()` toggled in `linter.rs`. `GitignoreBuilder` skipped when `no_gitignore` is true. CLI parsing and behavior tests added.
 
 - [ ] **Git-aware linting (`--changed`, `--staged`)**
   - Biome supports `--changed` and `--staged` to only lint files modified in git
@@ -542,3 +542,31 @@
   - **Goal**: Load additional rule packs as plugins (e.g., `--plugin security`, `--plugin react`)
   - Would enable ecosystem-specific rules without bloating the core binary
   - Complex: requires dynamic loading or conditional compilation of rule modules
+
+## Optimization round (performance pass)
+
+- [x] **Bundle `run_lint_and_print` booleans into `RunOptions` struct**
+  - Eliminated 15+ positional boolean parameters
+  - Removed `#[allow(clippy::too_many_arguments)]`
+- [x] **Reduce clones in hot paths**
+  - `filter_baseline`: removed `.to_string()` on `to_string_lossy()`
+  - `render_results`/`print_results`: take `&OutputFormat` instead of owned
+  - `apply_fixes`: early-return without collecting fixes when none exist; avoid `raw_messages.clone()` in suppression handling
+  - `statistics`: `HashMap<&str, usize>` instead of `HashMap<String, usize>`
+  - `add_noqa`: short-circuit files with no messages
+  - `diff mode`: only clone file content when `opts.diff` is true
+  - Text renderer: `lines().collect()` moved outside per-message loop
+  - JSON output: serialize slice directly when not quiet
+- [x] **Cache fast path for content strategy**
+  - Check metadata-based cache before reading file even when `cache_strategy == Content`
+  - Avoids disk reads when mtime/size haven't changed
+- [x] **O(1) ignore pattern lookups**
+  - Replaced nested loops in `is_ignored()` with `HashSet<String>` stored in `Linter`
+- [x] **Compile regexes once**
+  - `NoTodoRule`: changed from unit struct to struct with pre-compiled `Regex`
+  - All 18 language rules: converted on-the-fly `Regex::new` to `std::sync::LazyLock` statics
+- [x] **Dead code removal**
+  - Removed unused `create_default_config()` from `lib.rs`
+- [x] **Clean clippy warnings**
+  - `large_enum_variant` suppressed on `Commands` enum (CLI-only, constructed once)
+  - `collapsible_if` suppressed where let-chains are needed

@@ -1,6 +1,7 @@
 use crate::output::{LintMessage, Severity};
 use regex::Regex;
 use std::path::Path;
+use std::sync::LazyLock;
 
 pub trait LanguageRule: Send + Sync {
     fn name(&self) -> &str;
@@ -17,6 +18,8 @@ pub trait LanguageRule: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ConsoleLogRule;
 
+static CONSOLE_LOG_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"console\.(log|warn|error|info|debug)\(").unwrap());
+
 impl LanguageRule for ConsoleLogRule {
     fn name(&self) -> &str {
         "no-console-log"
@@ -24,7 +27,7 @@ impl LanguageRule for ConsoleLogRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"console\.(log|warn|error|info|debug)\(").unwrap();
+        let pattern = &*CONSOLE_LOG_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
@@ -50,6 +53,8 @@ impl LanguageRule for ConsoleLogRule {
 #[derive(Debug, Clone)]
 pub struct VarUsageRule;
 
+static NO_VAR_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bvar\s+\w+").unwrap());
+
 impl LanguageRule for VarUsageRule {
     fn name(&self) -> &str {
         "no-var"
@@ -57,7 +62,7 @@ impl LanguageRule for VarUsageRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\bvar\s+\w+").unwrap();
+        let pattern = &*NO_VAR_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
@@ -83,6 +88,8 @@ impl LanguageRule for VarUsageRule {
 #[derive(Debug, Clone)]
 pub struct PythonPrintRule;
 
+static PYTHON_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
+
 impl LanguageRule for PythonPrintRule {
     fn name(&self) -> &str {
         "no-print"
@@ -90,7 +97,7 @@ impl LanguageRule for PythonPrintRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\bprint\s*\(").unwrap();
+        let pattern = &*PYTHON_PRINT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with('#') {
@@ -264,6 +271,8 @@ impl LanguageRule for JavaStyleRule {
 #[derive(Debug, Clone)]
 pub struct RustUnwrapRule;
 
+static UNWRAP_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.unwrap\(\)").unwrap());
+
 impl LanguageRule for RustUnwrapRule {
     fn name(&self) -> &str {
         "no-unwrap"
@@ -271,7 +280,7 @@ impl LanguageRule for RustUnwrapRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\.unwrap\(\)").unwrap();
+        let pattern = &*UNWRAP_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
@@ -297,6 +306,8 @@ impl LanguageRule for RustUnwrapRule {
 #[derive(Debug, Clone)]
 pub struct RustExpectRule;
 
+static EXPECT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.expect\(").unwrap());
+
 impl LanguageRule for RustExpectRule {
     fn name(&self) -> &str {
         "no-expect"
@@ -304,7 +315,7 @@ impl LanguageRule for RustExpectRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\.expect\(").unwrap();
+        let pattern = &*EXPECT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
@@ -386,6 +397,8 @@ impl LanguageRule for SemicolonRule {
 #[derive(Debug, Clone)]
 pub struct RubyPutsRule;
 
+static PUTS_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bputs\s").unwrap());
+
 impl LanguageRule for RubyPutsRule {
     fn name(&self) -> &str {
         "no-puts"
@@ -393,7 +406,7 @@ impl LanguageRule for RubyPutsRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\bputs\s").unwrap();
+        let pattern = &*PUTS_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with('#') {
@@ -468,6 +481,8 @@ impl LanguageRule for RubyStyleRule {
 #[derive(Debug, Clone)]
 pub struct PhpEchoRule;
 
+static PHP_ECHO_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\becho\s").unwrap());
+
 impl LanguageRule for PhpEchoRule {
     fn name(&self) -> &str {
         "no-echo"
@@ -475,7 +490,7 @@ impl LanguageRule for PhpEchoRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\becho\s").unwrap();
+        let pattern = &*PHP_ECHO_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("//") {
@@ -501,6 +516,8 @@ impl LanguageRule for PhpEchoRule {
 #[derive(Debug, Clone)]
 pub struct SwiftPrintRule;
 
+static SWIFT_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
+
 impl LanguageRule for SwiftPrintRule {
     fn name(&self) -> &str {
         "no-swift-print"
@@ -508,7 +525,7 @@ impl LanguageRule for SwiftPrintRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\bprint\s*\(").unwrap();
+        let pattern = &*SWIFT_PRINT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("//") {
@@ -583,6 +600,8 @@ impl LanguageRule for KotlinStyleRule {
 #[derive(Debug, Clone)]
 pub struct DartPrintRule;
 
+static DART_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
+
 impl LanguageRule for DartPrintRule {
     fn name(&self) -> &str {
         "no-dart-print"
@@ -590,7 +609,7 @@ impl LanguageRule for DartPrintRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\bprint\s*\(").unwrap();
+        let pattern = &*DART_PRINT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("//") {
@@ -616,6 +635,8 @@ impl LanguageRule for DartPrintRule {
 #[derive(Debug, Clone)]
 pub struct CSharpConsoleRule;
 
+static CSHARP_CONSOLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Console\.(WriteLine?|Write)\s*\(").unwrap());
+
 impl LanguageRule for CSharpConsoleRule {
     fn name(&self) -> &str {
         "no-csharp-console"
@@ -623,7 +644,7 @@ impl LanguageRule for CSharpConsoleRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"Console\.(WriteLine?|Write)\s*\(").unwrap();
+        let pattern = &*CSHARP_CONSOLE_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("//") {
@@ -726,6 +747,8 @@ impl LanguageRule for ShellEchoRule {
 #[derive(Debug, Clone)]
 pub struct SqlSelectStarRule;
 
+static SQL_SELECT_STAR_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)SELECT\s+\*").unwrap());
+
 impl LanguageRule for SqlSelectStarRule {
     fn name(&self) -> &str {
         "sql-no-select-star"
@@ -733,7 +756,7 @@ impl LanguageRule for SqlSelectStarRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"(?i)SELECT\s+\*").unwrap();
+        let pattern = &*SQL_SELECT_STAR_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("--") && !line.trim_start().starts_with("/*") {
@@ -759,6 +782,8 @@ impl LanguageRule for SqlSelectStarRule {
 #[derive(Debug, Clone)]
 pub struct LuaPrintRule;
 
+static LUA_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
+
 impl LanguageRule for LuaPrintRule {
     fn name(&self) -> &str {
         "no-lua-print"
@@ -766,7 +791,7 @@ impl LanguageRule for LuaPrintRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\bprint\s*\(").unwrap();
+        let pattern = &*LUA_PRINT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("--") {
@@ -792,6 +817,8 @@ impl LanguageRule for LuaPrintRule {
 #[derive(Debug, Clone)]
 pub struct ScalaPrintRule;
 
+static SCALA_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"println\s*\(").unwrap());
+
 impl LanguageRule for ScalaPrintRule {
     fn name(&self) -> &str {
         "no-scala-println"
@@ -799,7 +826,7 @@ impl LanguageRule for ScalaPrintRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"println\s*\(").unwrap();
+        let pattern = &*SCALA_PRINT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("//") {
@@ -825,6 +852,8 @@ impl LanguageRule for ScalaPrintRule {
 #[derive(Debug, Clone)]
 pub struct RPrintRule;
 
+static R_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
+
 impl LanguageRule for RPrintRule {
     fn name(&self) -> &str {
         "no-r-print"
@@ -832,7 +861,7 @@ impl LanguageRule for RPrintRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"\bprint\s*\(").unwrap();
+        let pattern = &*R_PRINT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("#") {
@@ -858,6 +887,8 @@ impl LanguageRule for RPrintRule {
 #[derive(Debug, Clone)]
 pub struct ZigDebugPrintRule;
 
+static ZIG_DEBUG_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"std\.debug\.print").unwrap());
+
 impl LanguageRule for ZigDebugPrintRule {
     fn name(&self) -> &str {
         "no-zig-debug-print"
@@ -865,7 +896,7 @@ impl LanguageRule for ZigDebugPrintRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"std\.debug\.print").unwrap();
+        let pattern = &*ZIG_DEBUG_PRINT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("//") {
@@ -891,6 +922,8 @@ impl LanguageRule for ZigDebugPrintRule {
 #[derive(Debug, Clone)]
 pub struct HtmlInlineStyleRule;
 
+static HTML_STYLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"style\s*=\s*["']"#).unwrap());
+
 impl LanguageRule for HtmlInlineStyleRule {
     fn name(&self) -> &str {
         "html-no-inline-style"
@@ -898,7 +931,7 @@ impl LanguageRule for HtmlInlineStyleRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r#"style\s*=\s*["']"#).unwrap();
+        let pattern = &*HTML_STYLE_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
@@ -924,6 +957,8 @@ impl LanguageRule for HtmlInlineStyleRule {
 #[derive(Debug, Clone)]
 pub struct HtmlMissingAltRule;
 
+static HTML_IMG_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<img\s+[^>]*>").unwrap());
+
 impl LanguageRule for HtmlMissingAltRule {
     fn name(&self) -> &str {
         "html-img-alt"
@@ -931,7 +966,7 @@ impl LanguageRule for HtmlMissingAltRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let img_pattern = Regex::new(r"<img\s+[^>]*>").unwrap();
+        let img_pattern = &*HTML_IMG_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if img_pattern.is_match(line) && !line.to_lowercase().contains("alt=") {
@@ -957,6 +992,8 @@ impl LanguageRule for HtmlMissingAltRule {
 #[derive(Debug, Clone)]
 pub struct CssImportantRule;
 
+static CSS_IMPORTANT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"!important").unwrap());
+
 impl LanguageRule for CssImportantRule {
     fn name(&self) -> &str {
         "css-avoid-important"
@@ -964,7 +1001,7 @@ impl LanguageRule for CssImportantRule {
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
-        let pattern = Regex::new(r"!important").unwrap();
+        let pattern = &*CSS_IMPORTANT_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
             if pattern.is_match(line) && !line.trim_start().starts_with("/*") {

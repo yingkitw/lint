@@ -52,7 +52,7 @@ impl Linter {
                 max_length: config.max_line_length.unwrap_or(100),
             }) as Box<dyn Rule>,
             Box::new(crate::rules::TrailingWhitespaceRule) as Box<dyn Rule>,
-            Box::new(crate::rules::NoTodoRule) as Box<dyn Rule>,
+            Box::new(crate::rules::NoTodoRule::default()) as Box<dyn Rule>,
             Box::new(crate::rules::NoEmptyFileRule) as Box<dyn Rule>,
             Box::new(crate::rules::NoConsecutiveEmptyLinesRule) as Box<dyn Rule>,
             Box::new(crate::rules::NoTabsRule) as Box<dyn Rule>,

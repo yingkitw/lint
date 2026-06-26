@@ -55,7 +55,7 @@ fn test_lint_files_max_line_length() {
 
 #[test]
 fn test_create_default_config() {
-    let config = lint::create_default_config();
+    let config = ConfigBuilder::default().build();
     assert_eq!(config.max_line_length, Some(100));
     assert_eq!(config.rule_set.enabled_rules.len(), 4);
 }

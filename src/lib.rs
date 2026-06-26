@@ -29,6 +29,3 @@ pub fn lint_files_with_cache(
     linter.run()
 }
 
-pub fn create_default_config() -> Config {
-    ConfigBuilder::default().build()
-}

@@ -855,7 +855,7 @@ fn explain_rule(rule_name: &str) -> anyhow::Result<()> {
     let rule_set = lint::rules::RuleSet::new()
         .add_rule(Box::new(lint::rules::LineLengthRule { max_length: 100 }))
         .add_rule(Box::new(lint::rules::TrailingWhitespaceRule))
-        .add_rule(Box::new(lint::rules::NoTodoRule))
+        .add_rule(Box::new(lint::rules::NoTodoRule::default()))
         .add_rule(Box::new(lint::rules::NoEmptyFileRule))
         .add_rule(Box::new(lint::rules::NoConsecutiveEmptyLinesRule))
         .add_rule(Box::new(lint::rules::NoTabsRule));
