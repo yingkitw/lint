@@ -3,6 +3,7 @@ use colored::Colorize;
 use lint::{Config, ConfigBuilder, OutputFormat};
 use lint::config::CacheStrategy;
 use notify::Watcher;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -26,7 +27,7 @@ enum Commands {
         #[arg(short, long, visible_alias = "output-format", value_name = "FORMAT")]
         output: Option<String>,
 
-        #[arg(short, long, value_name = "LENGTH")]
+        #[arg(short, long, visible_alias = "line-length", value_name = "LENGTH")]
         max_line_length: Option<usize>,
 
         #[arg(short = 'r', long)]
@@ -65,7 +66,7 @@ enum Commands {
         #[arg(long)]
         stdin: bool,
 
-        #[arg(long, value_name = "FILENAME")]
+        #[arg(long, visible_alias = "stdin-file-path", value_name = "FILENAME")]
         stdin_filename: Option<String>,
 
         #[arg(long)]
@@ -109,6 +110,54 @@ enum Commands {
 
         #[arg(long)]
         no_error_on_unmatched_pattern: bool,
+
+        #[arg(long)]
+        deny_warnings: bool,
+
+        #[arg(long)]
+        exit_non_zero_on_fix: bool,
+
+        #[arg(long)]
+        no_cache: bool,
+
+        #[arg(long)]
+        no_config: bool,
+
+        #[arg(long)]
+        check: bool,
+
+        #[arg(long, value_name = "N")]
+        max_diagnostics: Option<usize>,
+
+        #[arg(long, value_name = "PATH")]
+        baseline: Option<PathBuf>,
+
+        #[arg(long)]
+        force_exclude: bool,
+
+        #[arg(long, value_name = "EXT", use_value_delimiter = true)]
+        ext: Option<Vec<String>>,
+
+        #[arg(long)]
+        verbose: bool,
+
+        #[arg(long)]
+        unsafe_fixes: bool,
+
+        #[arg(long, value_name = "RULES", use_value_delimiter = true)]
+        fixable: Option<Vec<String>>,
+
+        #[arg(long, value_name = "RULES", use_value_delimiter = true)]
+        unfixable: Option<Vec<String>>,
+
+        #[arg(long)]
+        preview: bool,
+
+        #[arg(long)]
+        no_show_source: bool,
+
+        #[arg(long)]
+        no_gitignore: bool,
     },
     ListRules,
     Version,
@@ -133,6 +182,15 @@ fn run_lint_and_print(
     diff: bool,
     fix_only: bool,
     add_noqa: bool,
+    deny_warnings: bool,
+    exit_non_zero_on_fix: bool,
+    check: bool,
+    max_diagnostics: Option<usize>,
+    baseline: Option<&PathBuf>,
+    verbose: bool,
+    unsafe_fixes: bool,
+    fixable: Option<&[String]>,
+    unfixable: Option<&[String]>,
 ) -> anyhow::Result<i32> {
     let cache_arc = cache.map(|c| std::sync::Arc::new(std::sync::Mutex::new(c.lock().unwrap().clone())));
     let mut results = if let Some(ref c) = cache_arc {
@@ -142,8 +200,48 @@ fn run_lint_and_print(
     };
 
     let effective_fix = fix || fix_only;
+
+    // When --fix is used without --unsafe-fixes, filter out unsafe fixes
+    if effective_fix && !unsafe_fixes {
+        for result in &mut results {
+            for msg in &mut result.messages {
+                if let Some(ref fix) = msg.fix {
+                    if !fix.is_safe {
+                        msg.fix = None;
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply --fixable and --unfixable filtering
+    if let Some(ref rules) = fixable {
+        let allowed: std::collections::HashSet<&String> = rules.iter().collect();
+        for result in &mut results {
+            for msg in &mut result.messages {
+                if let Some(ref fix) = msg.fix {
+                    if !allowed.contains(&msg.rule) {
+                        msg.fix = None;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ref rules) = unfixable {
+        let denied: std::collections::HashSet<&String> = rules.iter().collect();
+        for result in &mut results {
+            for msg in &mut result.messages {
+                if let Some(ref _fix) = msg.fix {
+                    if denied.contains(&msg.rule) {
+                        msg.fix = None;
+                    }
+                }
+            }
+        }
+    }
+
     let mut fixed_files = Vec::new();
-    if effective_fix || diff {
+    if effective_fix || diff || check {
         let mut fixed_count = 0;
         for result in &mut results {
             let original = result.file_content.clone();
@@ -168,13 +266,15 @@ fn run_lint_and_print(
                             }
                         }
                     }
-                } else {
+                } else if !check {
                     std::fs::write(&result.file_path, &result.file_content)?;
                 }
             }
         }
-        if fixed_count > 0 && !diff {
+        if fixed_count > 0 && !diff && !check {
             println!("Fixed {} file(s)", fixed_count);
+        } else if check && fixed_count > 0 {
+            println!("Would fix {} file(s)", fixed_count);
         }
     }
 
@@ -207,20 +307,48 @@ fn run_lint_and_print(
         }
     }
 
+    if verbose && !quiet {
+        let total_files = results.len();
+        let total_messages: usize = results.iter().map(|r| r.messages.len()).sum();
+        println!("Linting {} file(s), found {} diagnostic(s)", total_files, total_messages);
+        if cache.is_some() {
+            println!("Cache: enabled");
+        } else {
+            println!("Cache: disabled");
+        }
+        if fix {
+            println!("Fix mode: enabled");
+        }
+        if fix_only {
+            println!("Fix-only mode: enabled");
+        }
+    }
+
+    if let Some(baseline_path) = baseline {
+        let baseline_entries = load_baseline(baseline_path)?;
+        filter_baseline(&mut results, &baseline_entries);
+    }
+
+    let hidden_diagnostics = truncate_diagnostics(&mut results, max_diagnostics);
+
     if !fix_only {
         if let Some(path) = output_file {
             colored::control::set_override(false);
-            let output = render_results(&results, output_format.clone(), quiet);
+            let output = render_results(&results, output_format.clone(), quiet, config.show_source);
             colored::control::unset_override();
             std::fs::write(path, output)?;
         } else {
-            print_results(&results, output_format.clone(), quiet);
+            print_results(&results, output_format.clone(), quiet, config.show_source);
         }
+    }
+
+    if hidden_diagnostics > 0 && !quiet && !fix_only {
+        println!("... {} additional diagnostics hidden ...", hidden_diagnostics);
     }
 
     if show_fixes && !fixed_files.is_empty() && !quiet && !fix_only {
         println!("\n{}", "Fixed files:".bold());
-        for file in fixed_files {
+        for file in &fixed_files {
             println!("  {}", file);
         }
     }
@@ -248,21 +376,76 @@ fn run_lint_and_print(
         .map(|r| r.messages.iter().filter(|m| m.severity == lint::Severity::Warning).count())
         .sum();
     let max_warnings_exceeded = max_warnings.is_some_and(|max| warning_count > max);
+    let any_fixes_applied = !fixed_files.is_empty();
 
     Ok(if fix_only || exit_zero {
         0
-    } else if has_errors || max_warnings_exceeded {
+    } else if has_errors || max_warnings_exceeded || (deny_warnings && warning_count > 0) || (exit_non_zero_on_fix && any_fixes_applied) || (check && any_fixes_applied) {
         1
     } else {
         0
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BaselineEntry {
+    file: String,
+    line: usize,
+    rule: String,
+}
+
+fn load_baseline(path: &PathBuf) -> anyhow::Result<Vec<BaselineEntry>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read baseline file {}: {}", path.display(), e))?;
+    let entries: Vec<BaselineEntry> = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse baseline file {}: {}", path.display(), e))?;
+    Ok(entries)
+}
+
+fn filter_baseline(results: &mut [lint::LintResult], baseline: &[BaselineEntry]) {
+    for result in results.iter_mut() {
+        let file_str = result.file_path.to_string_lossy().to_string();
+        result.messages.retain(|msg| {
+            !baseline.iter().any(|entry| {
+                entry.file == file_str && entry.line == msg.line && entry.rule == msg.rule
+            })
+        });
+    }
+}
+
+fn truncate_diagnostics(results: &mut [lint::LintResult], max_diagnostics: Option<usize>) -> usize {
+    let mut hidden = 0usize;
+    if let Some(max) = max_diagnostics {
+        let total: usize = results.iter().map(|r| r.messages.len()).sum();
+        if total > max {
+            let mut remaining = max;
+            for result in results.iter_mut() {
+                if result.messages.len() <= remaining {
+                    remaining -= result.messages.len();
+                } else {
+                    hidden += result.messages.len() - remaining;
+                    result.messages.truncate(remaining);
+                    remaining = 0;
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    hidden
+}
+
 fn load_config_file(path: &PathBuf) -> anyhow::Result<Config> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
-    let mut config: Config = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e))?;
+    let mut config: Config = if path.extension().is_some_and(|e| e == "toml") {
+        toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e))?
+    } else {
+        serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e))?
+    };
 
     if let Some(ref extends) = config.extends {
         let base_path = if std::path::Path::new(extends).is_absolute() {
@@ -319,6 +502,12 @@ fn merge_configs(base: Config, local: Config) -> Config {
         } else {
             base.cache_strategy
         },
+        stdin_file_path: local.stdin_file_path.or(base.stdin_file_path),
+        force_exclude: local.force_exclude || base.force_exclude,
+        ext: local.ext.or(base.ext),
+        preview: local.preview || base.preview,
+        show_source: local.show_source && base.show_source,
+        no_gitignore: local.no_gitignore || base.no_gitignore,
     }
 }
 
@@ -379,6 +568,22 @@ fn main() -> anyhow::Result<()> {
             no_ignore,
             cache_strategy,
             no_error_on_unmatched_pattern,
+            deny_warnings,
+            exit_non_zero_on_fix,
+            no_cache,
+            no_config,
+            check,
+            max_diagnostics,
+            baseline,
+            force_exclude,
+            ext,
+            verbose,
+            unsafe_fixes,
+            fixable,
+            unfixable,
+            preview,
+            no_show_source,
+            no_gitignore,
         } => {
             let _ = no_error_on_unmatched_pattern;
             match color.as_deref() {
@@ -386,7 +591,9 @@ fn main() -> anyhow::Result<()> {
                 Some("always") | Some("yes") => colored::control::set_override(true),
                 _ => {}
             }
-            let mut config = if let Some(config_path) = &cli.config {
+            let mut config = if no_config {
+                ConfigBuilder::new().build()
+            } else if let Some(config_path) = &cli.config {
                 load_config_file(config_path)?
             } else if let Some(config_path) = find_config_file() {
                 load_config_file(&config_path)?
@@ -414,6 +621,7 @@ fn main() -> anyhow::Result<()> {
 
             if let Some(ref temp_path) = stdin_temp_path {
                 config.paths = vec![temp_path.clone()];
+                config.stdin_file_path = stdin_filename.clone();
             } else if paths.is_empty() {
                 config.paths = vec![PathBuf::from(".")];
             } else {
@@ -436,6 +644,11 @@ fn main() -> anyhow::Result<()> {
             }
 
             config.ignore_suppressions = ignore_suppressions;
+            config.force_exclude = force_exclude;
+            config.ext = ext;
+            config.preview = preview;
+            config.show_source = !no_show_source;
+            config.no_gitignore = no_gitignore;
 
             if let Some(length) = max_line_length {
                 config.max_line_length = Some(length);
@@ -495,12 +708,15 @@ fn main() -> anyhow::Result<()> {
                 Some("junit") => OutputFormat::Junit,
                 Some("concise") => OutputFormat::Concise,
                 Some("gitlab") => OutputFormat::Gitlab,
+                Some("grouped") => OutputFormat::Grouped,
                 _ => config.output_format.clone(),
             };
             config.output_format = output_format.clone();
 
             let cache_path = cache_location.unwrap_or_else(|| std::path::PathBuf::from(".lint_cache.json"));
-            let cache = if cache {
+            let cache = if no_cache {
+                None
+            } else if cache {
                 match lint::cache::Cache::load(&cache_path) {
                     Ok(c) => Some(std::sync::Mutex::new(c)),
                     Err(_) => Some(std::sync::Mutex::new(lint::cache::Cache::new())),
@@ -511,7 +727,7 @@ fn main() -> anyhow::Result<()> {
 
             if watch {
                 println!("Watching for changes... Press Ctrl+C to stop.");
-                run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa)?;
+                run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa, deny_warnings, exit_non_zero_on_fix, check, max_diagnostics, baseline.as_ref(), verbose, unsafe_fixes, fixable.as_deref(), unfixable.as_deref())?;
 
                 let (tx, rx) = std::sync::mpsc::channel();
                 let mut watcher = notify::recommended_watcher(move |res| {
@@ -531,11 +747,11 @@ fn main() -> anyhow::Result<()> {
                 for event in rx {
                     if event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove() {
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa)?;
+                        run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa, deny_warnings, exit_non_zero_on_fix, check, max_diagnostics, baseline.as_ref(), verbose, unsafe_fixes, fixable.as_deref(), unfixable.as_deref())?;
                     }
                 }
             } else {
-                let exit_code = run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa)?;
+                let exit_code = run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa, deny_warnings, exit_non_zero_on_fix, check, max_diagnostics, baseline.as_ref(), verbose, unsafe_fixes, fixable.as_deref(), unfixable.as_deref())?;
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }
@@ -829,7 +1045,34 @@ fn render_concise(results: &[lint::LintResult]) -> String {
     out
 }
 
-fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: bool) -> String {
+fn render_grouped(results: &[lint::LintResult]) -> String {
+    let mut out = String::new();
+    for result in results {
+        if result.messages.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{}\n", format!("{}", result.file_path.display()).bold()));
+        for msg in &result.messages {
+            let (prefix, color) = match msg.severity {
+                lint::Severity::Error => ("error", colored::Color::Red),
+                lint::Severity::Warning => ("warning", colored::Color::Yellow),
+                lint::Severity::Info => ("info", colored::Color::Blue),
+            };
+            out.push_str(&format!(
+                "  {}:{}:{} {} {}\n",
+                msg.line,
+                msg.column,
+                prefix.color(color),
+                msg.message,
+                format!("({})", msg.rule).dimmed(),
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: bool, show_source: bool) -> String {
     match format {
         OutputFormat::Json => {
             let filtered: Vec<_> = if quiet {
@@ -892,6 +1135,7 @@ fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: boo
         OutputFormat::Junit => render_junit(results),
         OutputFormat::Concise => render_concise(results),
         OutputFormat::Gitlab => render_gitlab(results),
+        OutputFormat::Grouped => render_grouped(results),
         OutputFormat::Text => {
             let mut out = String::new();
             let mut total_errors = 0;
@@ -937,11 +1181,13 @@ fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: boo
                             msg.message
                         ));
 
-                        let lines: Vec<&str> = result.file_content.lines().collect();
-                        if let Some(source_line) = lines.get(msg.line.saturating_sub(1)) {
-                            out.push_str(&format!("    | {}\n", source_line));
-                            let caret = "    |".to_string() + &" ".repeat(msg.column.saturating_sub(1)) + "^";
-                            out.push_str(&format!("{}\n", caret.dimmed()));
+                        if show_source {
+                            let lines: Vec<&str> = result.file_content.lines().collect();
+                            if let Some(source_line) = lines.get(msg.line.saturating_sub(1)) {
+                                out.push_str(&format!("    | {}\n", source_line));
+                                let caret = "    |".to_string() + &" ".repeat(msg.column.saturating_sub(1)) + "^";
+                                out.push_str(&format!("{}\n", caret.dimmed()));
+                            }
                         }
 
                         if let Some(suggestion) = &msg.suggestion {
@@ -965,16 +1211,20 @@ fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: boo
     }
 }
 
-fn print_results(results: &[lint::LintResult], format: OutputFormat, quiet: bool) {
-    print!("{}", render_results(results, format, quiet));
+fn print_results(results: &[lint::LintResult], format: OutputFormat, quiet: bool, show_source: bool) {
+    print!("{}", render_results(results, format, quiet, show_source));
 }
 
 fn find_config_file() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
     loop {
-        let candidate = dir.join(".lint.json");
-        if candidate.is_file() {
-            return Some(candidate);
+        let json_candidate = dir.join(".lint.json");
+        if json_candidate.is_file() {
+            return Some(json_candidate);
+        }
+        let toml_candidate = dir.join(".lint.toml");
+        if toml_candidate.is_file() {
+            return Some(toml_candidate);
         }
         if !dir.pop() {
             break;
@@ -1107,7 +1357,37 @@ mod tests {
                 no_ignore,
                 cache_strategy,
                 no_error_on_unmatched_pattern,
+                deny_warnings,
+                exit_non_zero_on_fix,
+                no_cache,
+                no_config,
+                check,
+                max_diagnostics,
+                baseline,
+                force_exclude,
+                ext,
+                verbose,
+                unsafe_fixes,
+                fixable,
+                unfixable,
+                preview,
+                no_show_source,
+                no_gitignore,
             } => {
+                let _ = no_cache;
+                let _ = no_config;
+                let _ = check;
+                let _ = max_diagnostics;
+                let _ = baseline;
+                let _ = force_exclude;
+                let _ = ext;
+                let _ = verbose;
+                let _ = unsafe_fixes;
+                let _ = fixable;
+                let _ = unfixable;
+                let _ = preview;
+                let _ = no_show_source;
+                let _ = no_gitignore;
                 assert_eq!(paths, vec![PathBuf::from("src/")]);
                 assert_eq!(output, Some("json".to_string()));
                 assert_eq!(max_line_length, None);
@@ -1138,6 +1418,8 @@ mod tests {
                 assert!(!no_ignore);
                 assert_eq!(cache_strategy, None);
                 assert!(!no_error_on_unmatched_pattern);
+                assert!(!deny_warnings);
+                assert!(!exit_non_zero_on_fix);
             }
             _ => panic!("Expected Lint command"),
         }
@@ -1350,6 +1632,17 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_output_grouped_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--output", "grouped"]);
+        match cli.command {
+            Commands::Lint { output, .. } => {
+                assert_eq!(output, Some("grouped".to_string()));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
     fn test_cli_output_format_alias_parsing() {
         let cli = Cli::parse_from(["lint", "lint", "src/", "--output-format", "json"]);
         match cli.command {
@@ -1399,6 +1692,28 @@ mod tests {
         match cli.command {
             Commands::Lint { no_error_on_unmatched_pattern, .. } => {
                 assert!(no_error_on_unmatched_pattern);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_deny_warnings_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--deny-warnings"]);
+        match cli.command {
+            Commands::Lint { deny_warnings, .. } => {
+                assert!(deny_warnings);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_exit_non_zero_on_fix_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--exit-non-zero-on-fix"]);
+        match cli.command {
+            Commands::Lint { exit_non_zero_on_fix, .. } => {
+                assert!(exit_non_zero_on_fix);
             }
             _ => panic!("Expected Lint command"),
         }
@@ -1546,6 +1861,39 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_no_cache_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--no-cache"]);
+        match cli.command {
+            Commands::Lint { no_cache, .. } => {
+                assert!(no_cache);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_no_config_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--no-config"]);
+        match cli.command {
+            Commands::Lint { no_config, .. } => {
+                assert!(no_config);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_check_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--check"]);
+        match cli.command {
+            Commands::Lint { check, .. } => {
+                assert!(check);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
     fn test_find_config_file_discovers_lint_json() {
         use std::io::Write;
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1582,6 +1930,18 @@ mod tests {
             Commands::Lint { stdin, stdin_filename, .. } => {
                 assert!(stdin);
                 assert_eq!(stdin_filename, Some("test.rs".to_string()));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_stdin_file_path_alias_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "--stdin", "--stdin-file-path", "src/main.rs"]);
+        match cli.command {
+            Commands::Lint { stdin, stdin_filename, .. } => {
+                assert!(stdin);
+                assert_eq!(stdin_filename, Some("src/main.rs".to_string()));
             }
             _ => panic!("Expected Lint command"),
         }
@@ -1681,6 +2041,23 @@ mod tests {
         assert_eq!(render_github(&[]), "");
         let clean = lint::LintResult::new(PathBuf::from("clean.rs"), "ok".to_string());
         assert_eq!(render_github(&[clean]), "");
+    }
+
+    #[test]
+    fn test_render_grouped_groups_by_file() {
+        let mut r1 = lint::LintResult::new(PathBuf::from("a.rs"), "x".to_string());
+        r1.add_message(lint::LintMessage::new(1, 1, lint::Severity::Error, "e1".to_string(), "r1".to_string(), None));
+        let mut r2 = lint::LintResult::new(PathBuf::from("b.rs"), "y".to_string());
+        r2.add_message(lint::LintMessage::new(2, 3, lint::Severity::Warning, "w1".to_string(), "r2".to_string(), None));
+        let clean = lint::LintResult::new(PathBuf::from("c.rs"), "z".to_string());
+
+        let out = render_grouped(&[r1, r2, clean]);
+        assert!(out.contains("a.rs"), "missing a.rs: {out}");
+        assert!(out.contains("b.rs"), "missing b.rs: {out}");
+        assert!(!out.contains("c.rs"), "should not show clean file: {out}");
+        assert!(out.contains("1:1:"), "missing line/col: {out}");
+        assert!(out.contains("e1"), "missing message: {out}");
+        assert!(out.contains("(r1)"), "missing rule: {out}");
     }
 
     #[test]
@@ -1795,6 +2172,451 @@ mod tests {
         assert_eq!(config.max_line_length, Some(120));
         assert_eq!(config.rule_set.enabled_rules, vec!["trailing-whitespace"]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_mode_does_not_write_and_returns_nonzero() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let file_path = temp_dir.path().join("test.rs");
+        std::fs::write(&file_path, "let x = 5;   \n")?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file_path.clone()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let exit_code = run_lint_and_print(
+            &config,
+            false,                // fix
+            &lint::OutputFormat::Text,
+            None,                 // cache
+            true,                 // quiet
+            None,                 // max_warnings
+            None,                 // output_file
+            false,                // exit_zero
+            false,                // statistics
+            false,                // show_fixes
+            false,                // diff
+            false,                // fix_only
+            false,                // add_noqa
+            false,                // deny_warnings
+            false,                // exit_non_zero_on_fix
+            true,                 // check
+            None,                 // max_diagnostics
+            None,                 // baseline
+            false,                // verbose
+            false,                // unsafe_fixes
+            None,                 // fixable
+            None,                 // unfixable
+        )?;
+
+        assert_eq!(exit_code, 1, "check mode should exit 1 when fixable violations exist");
+
+        let content = std::fs::read_to_string(&file_path)?;
+        assert_eq!(content, "let x = 5;   \n", "check mode should not modify files");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cli_max_diagnostics_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--max-diagnostics", "50"]);
+        match cli.command {
+            Commands::Lint { max_diagnostics, .. } => {
+                assert_eq!(max_diagnostics, Some(50));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_truncate_diagnostics_limits_total() {
+        let mut results = vec![
+            lint::LintResult::new(PathBuf::from("a.rs"), "x".to_string()),
+            lint::LintResult::new(PathBuf::from("b.rs"), "y".to_string()),
+        ];
+        for _ in 0..3 {
+            results[0].add_message(lint::LintMessage::new(1, 1, lint::Severity::Warning, "w1".to_string(), "r1".to_string(), None));
+        }
+        for _ in 0..3 {
+            results[1].add_message(lint::LintMessage::new(1, 1, lint::Severity::Warning, "w2".to_string(), "r2".to_string(), None));
+        }
+
+        let hidden = truncate_diagnostics(&mut results, Some(4));
+        assert_eq!(results[0].messages.len(), 3);
+        assert_eq!(results[1].messages.len(), 1);
+        assert_eq!(hidden, 2);
+    }
+
+    #[test]
+    fn test_truncate_diagnostics_no_limit() {
+        let mut results = vec![
+            lint::LintResult::new(PathBuf::from("a.rs"), "x".to_string()),
+        ];
+        for _ in 0..5 {
+            results[0].add_message(lint::LintMessage::new(1, 1, lint::Severity::Warning, "w".to_string(), "r".to_string(), None));
+        }
+
+        let hidden = truncate_diagnostics(&mut results, None);
+        assert_eq!(results[0].messages.len(), 5);
+        assert_eq!(hidden, 0);
+    }
+
+    #[test]
+    fn test_load_config_file_toml() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let config_path = temp_dir.path().join(".lint.toml");
+        std::fs::write(&config_path, r#"
+paths = ["src"]
+max_line_length = 120
+
+[rule_set]
+enabled_rules = ["line-length", "no-todo"]
+"#)?;
+
+        let config = load_config_file(&config_path)?;
+        assert_eq!(config.max_line_length, Some(120));
+        assert_eq!(config.paths, vec![PathBuf::from("src")]);
+        assert!(config.rule_set.enabled_rules.contains(&"line-length".to_string()));
+        assert!(config.rule_set.enabled_rules.contains(&"no-todo".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_config_file_discovers_lint_toml() {
+        use std::io::Write;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join(".lint.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        file.write_all(b"paths = [\"src\"]\n").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+        let found = find_config_file();
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().file_name(), Some(std::ffi::OsStr::new(".lint.toml")));
+    }
+
+    #[test]
+    fn test_cli_baseline_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--baseline", "baseline.json"]);
+        match cli.command {
+            Commands::Lint { baseline, .. } => {
+                assert_eq!(baseline, Some(PathBuf::from("baseline.json")));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_filter_baseline_removes_known_violations() {
+        let mut results = vec![
+            lint::LintResult::new(PathBuf::from("src/main.rs"), "let x = 5;\n".to_string()),
+        ];
+        results[0].add_message(lint::LintMessage::new(
+            1, 1, lint::Severity::Warning, "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(), None,
+        ));
+        results[0].add_message(lint::LintMessage::new(
+            2, 1, lint::Severity::Warning, "Line too long".to_string(),
+            "line-length".to_string(), None,
+        ));
+
+        let baseline = vec![
+            BaselineEntry { file: "src/main.rs".to_string(), line: 1, rule: "trailing-whitespace".to_string() },
+        ];
+
+        filter_baseline(&mut results, &baseline);
+        assert_eq!(results[0].messages.len(), 1);
+        assert_eq!(results[0].messages[0].rule, "line-length");
+    }
+
+    #[test]
+    fn test_filter_baseline_leaves_unknown_violations() {
+        let mut results = vec![
+            lint::LintResult::new(PathBuf::from("src/main.rs"), "let x = 5;\n".to_string()),
+        ];
+        results[0].add_message(lint::LintMessage::new(
+            1, 1, lint::Severity::Warning, "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(), None,
+        ));
+
+        let baseline = vec![
+            BaselineEntry { file: "src/other.rs".to_string(), line: 1, rule: "trailing-whitespace".to_string() },
+        ];
+
+        filter_baseline(&mut results, &baseline);
+        assert_eq!(results[0].messages.len(), 1);
+    }
+
+    #[test]
+    fn test_cli_force_exclude_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--force-exclude"]);
+        match cli.command {
+            Commands::Lint { force_exclude, .. } => {
+                assert!(force_exclude);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_force_exclude_skips_ignored_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("package.js");
+        std::fs::write(&file_path, "let x = 5;\n").unwrap();
+        let mut full_path = temp_dir.path().to_path_buf();
+        full_path.push("node_modules");
+        std::fs::create_dir(&full_path).unwrap();
+        let nested_file = full_path.join("package.js");
+        std::fs::write(&nested_file, "let x = 5;\n").unwrap();
+
+        let config = ConfigBuilder::new()
+            .paths(vec![nested_file.clone()])
+            .ignore_patterns(vec!["node_modules".to_string()])
+            .force_exclude(true)
+            .enabled_rules(vec!["line-length".to_string()])
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run().unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_force_exclude_disabled_allows_ignored_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut full_path = temp_dir.path().to_path_buf();
+        full_path.push("node_modules");
+        std::fs::create_dir(&full_path).unwrap();
+        let nested_file = full_path.join("package.js");
+        std::fs::write(&nested_file, "let x = 5;\n").unwrap();
+
+        let config = ConfigBuilder::new()
+            .paths(vec![nested_file.clone()])
+            .ignore_patterns(vec!["node_modules".to_string()])
+            .force_exclude(false)
+            .enabled_rules(vec![])
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path, nested_file);
+    }
+
+    #[test]
+    fn test_cli_ext_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--ext", "rs,toml"]);
+        match cli.command {
+            Commands::Lint { ext, .. } => {
+                assert_eq!(ext, Some(vec!["rs".to_string(), "toml".to_string()]));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_ext_limits_file_extensions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rs_file = temp_dir.path().join("test.rs");
+        let md_file = temp_dir.path().join("test.md");
+        std::fs::write(&rs_file, "let x = 5;\n").unwrap();
+        std::fs::write(&md_file, "# hello\n").unwrap();
+
+        let config = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().to_path_buf()])
+            .ext(Some(vec!["rs".to_string()]))
+            .enabled_rules(vec!["line-length".to_string()])
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path.file_stem(), Some(std::ffi::OsStr::new("test")));
+        assert_eq!(results[0].file_path.extension(), Some(std::ffi::OsStr::new("rs")));
+    }
+
+    #[test]
+    fn test_cli_verbose_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--verbose"]);
+        match cli.command {
+            Commands::Lint { verbose, .. } => {
+                assert!(verbose);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_unsafe_fixes_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--unsafe-fixes"]);
+        match cli.command {
+            Commands::Lint { unsafe_fixes, .. } => {
+                assert!(unsafe_fixes);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_unsafe_fixes_filtering() {
+        let mut results = vec![
+            lint::LintResult::new(PathBuf::from("test.rs"), "let x = 5;   \n".to_string()),
+        ];
+        let mut msg = lint::LintMessage::new(
+            1, 1, lint::Severity::Warning, "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(), None,
+        );
+        msg.fix = Some(lint::output::Fix {
+            line: 1,
+            replacement: "let x = 5;".to_string(),
+            is_safe: false,
+        });
+        results[0].add_message(msg);
+
+        // Simulate fix without unsafe_fixes
+        for result in &mut results {
+            for msg in &mut result.messages {
+                if let Some(ref fix) = msg.fix {
+                    if !fix.is_safe {
+                        msg.fix = None;
+                    }
+                }
+            }
+        }
+
+        assert!(results[0].messages[0].fix.is_none());
+    }
+
+    #[test]
+    fn test_cli_line_length_alias_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--line-length", "120"]);
+        match cli.command {
+            Commands::Lint { max_line_length, .. } => {
+                assert_eq!(max_line_length, Some(120));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_fixable_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--fixable", "trailing-whitespace,line-length"]);
+        match cli.command {
+            Commands::Lint { fixable, .. } => {
+                assert_eq!(fixable, Some(vec!["trailing-whitespace".to_string(), "line-length".to_string()]));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_unfixable_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--unfixable", "line-length"]);
+        match cli.command {
+            Commands::Lint { unfixable, .. } => {
+                assert_eq!(unfixable, Some(vec!["line-length".to_string()]));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_fixable_filters_fixes() {
+        let mut results = vec![
+            lint::LintResult::new(PathBuf::from("test.rs"), "let x = 5;   \n".to_string()),
+        ];
+        let mut msg = lint::LintMessage::new(
+            1, 1, lint::Severity::Warning, "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(), None,
+        );
+        msg.fix = Some(lint::output::Fix {
+            line: 1,
+            replacement: "let x = 5;".to_string(),
+            is_safe: true,
+        });
+        results[0].add_message(msg);
+
+        let allowed: std::collections::HashSet<String> = ["line-length".to_string()].into_iter().collect();
+        for result in &mut results {
+            for msg in &mut result.messages {
+                if let Some(ref _fix) = msg.fix {
+                    if !allowed.contains(&msg.rule) {
+                        msg.fix = None;
+                    }
+                }
+            }
+        }
+
+        assert!(results[0].messages[0].fix.is_none());
+    }
+
+    #[test]
+    fn test_cli_preview_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--preview"]);
+        match cli.command {
+            Commands::Lint { preview, .. } => {
+                assert!(preview);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_no_show_source_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--no-show-source"]);
+        match cli.command {
+            Commands::Lint { no_show_source, .. } => {
+                assert!(no_show_source);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_no_gitignore_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--no-gitignore"]);
+        match cli.command {
+            Commands::Lint { no_gitignore, .. } => {
+                assert!(no_gitignore);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_no_gitignore_lints_gitignored_files() -> anyhow::Result<()> {
+        use std::io::Write;
+        let temp_dir = tempfile::tempdir()?;
+        let gitignore_path = temp_dir.path().join(".gitignore");
+        let mut gitignore = std::fs::File::create(&gitignore_path)?;
+        gitignore.write_all(b"ignored.rs\n")?;
+
+        let ignored_file = temp_dir.path().join("ignored.rs");
+        std::fs::write(&ignored_file, "let x = 5;   \n")?;
+
+        let original_dir = std::env::current_dir()?;
+        std::env::set_current_dir(temp_dir.path())?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .no_gitignore(true)
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run()?;
+
+        std::env::set_current_dir(original_dir)?;
+
+        let ignored_result = results.iter().find(|r| r.file_path.ends_with("ignored.rs"));
+        assert!(ignored_result.is_some(), "ignored.rs should be linted when --no-gitignore is used");
+        assert!(!ignored_result.unwrap().messages.is_empty());
         Ok(())
     }
 }

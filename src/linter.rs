@@ -5,7 +5,7 @@ use crate::output::{LintMessage, LintResult, Severity};
 use crate::rules::{Rule, RuleSet};
 use anyhow::{Context, Result};
 use ignore::gitignore::GitignoreBuilder;
-use ignore::Walk;
+use ignore::{Walk, WalkBuilder};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -34,9 +34,13 @@ impl Linter {
     }
 
     pub fn new_with_cache(config: &Config, cache: Option<Arc<Mutex<Cache>>>) -> Self {
-        let mut builder = GitignoreBuilder::new(".");
-        builder.add(".gitignore");
-        let gitignore = builder.build().ok();
+        let gitignore = if config.no_gitignore {
+            None
+        } else {
+            let mut builder = GitignoreBuilder::new(".");
+            builder.add(".gitignore");
+            builder.build().ok()
+        };
 
         let mut rule_set = RuleSet::new();
 
@@ -95,7 +99,10 @@ impl Linter {
             if path.is_file() && self.should_lint_file(path) && !self.is_ignored(path) {
                 files.push(path.to_path_buf());
             } else if path.is_dir() {
-                for entry in Walk::new(path).flatten() {
+                let walker = WalkBuilder::new(path)
+                    .git_ignore(!self.config.no_gitignore)
+                    .build();
+                for entry in walker.flatten() {
                     let entry_path = entry.path();
                     if self.is_ignored(entry_path) {
                         continue;
@@ -129,6 +136,9 @@ impl Linter {
         let mut results = Vec::new();
 
         if path.is_file() {
+            if self.config.force_exclude && self.is_ignored(path) {
+                return Ok(results);
+            }
             let result = self.lint_file(path)?;
             results.push(result);
         } else if path.is_dir() {
@@ -142,7 +152,10 @@ impl Linter {
     fn lint_directory(&self, dir: &Path) -> Result<Vec<LintResult>> {
         let mut results = Vec::new();
 
-        for entry in Walk::new(dir) {
+        let walker = WalkBuilder::new(dir)
+            .git_ignore(!self.config.no_gitignore)
+            .build();
+        for entry in walker {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
@@ -183,6 +196,18 @@ impl Linter {
         false
     }
 
+    fn effective_path<'a>(&'a self, path: &'a Path) -> &'a Path {
+        if let Some(ref stdin_path) = self.config.stdin_file_path
+            && path.file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.starts_with("lint_stdin_"))
+        {
+            Path::new(stdin_path.as_str())
+        } else {
+            path
+        }
+    }
+
     fn lint_file(&self, path: &Path) -> Result<LintResult> {
         let use_content_hash = self.config.cache_strategy == crate::config::CacheStrategy::Content;
 
@@ -199,7 +224,7 @@ impl Linter {
         {
             let cache_guard = cache.lock().unwrap();
             if let Some(cached_messages) = cache_guard.get(path, mtime, size) {
-                let mut result = LintResult::new(path.to_path_buf(), String::new());
+                let mut result = LintResult::new(self.effective_path(path).to_path_buf(), String::new());
                 result.messages = cached_messages.clone();
                 return Ok(result);
             }
@@ -220,13 +245,13 @@ impl Linter {
             });
             let cache_guard = cache.lock().unwrap();
             if let Some(cached_messages) = cache_guard.get_by_hash(path, &hash) {
-                let mut result = LintResult::new(path.to_path_buf(), content);
+                let mut result = LintResult::new(self.effective_path(path).to_path_buf(), content);
                 result.messages = cached_messages.clone();
                 return Ok(result);
             }
         }
 
-        let mut result = LintResult::new(path.to_path_buf(), content);
+        let mut result = LintResult::new(self.effective_path(path).to_path_buf(), content);
 
         let file_level_ignored = Self::parse_file_level_ignore(&result.file_content);
         if file_level_ignored.clone().is_some_and(|rules| rules.is_empty()) {
@@ -329,7 +354,7 @@ impl Linter {
         }
 
         if !self.config.per_file_ignores.is_empty() {
-            let path_str = path.to_string_lossy();
+            let path_str = self.effective_path(path).to_string_lossy();
             let mut ignored_rules: Vec<&str> = Vec::new();
             for (pattern, rules) in &self.config.per_file_ignores {
                 if let Ok(glob_pattern) = glob::Pattern::new(pattern)
@@ -518,14 +543,17 @@ impl Linter {
 
     fn should_lint_file(&self, path: &Path) -> bool {
         if let Some(extension) = path.extension() {
-            let supported_extensions = [
-                "rs", "js", "ts", "jsx", "tsx", "py", "java", "go", "c", "cpp", "h", "hpp", "rb",
-                "php", "swift", "kt", "dart", "cs", "sh", "bash", "sql", "lua", "scala", "r", "zig",
-                "html", "htm", "css", "scss", "sass",
-            ];
-            supported_extensions
-                .iter()
-                .any(|ext| *ext == extension.to_string_lossy().as_ref())
+            let ext_str = extension.to_string_lossy();
+            if let Some(ref configured_exts) = self.config.ext {
+                configured_exts.iter().any(|ext| ext == ext_str.as_ref())
+            } else {
+                let supported_extensions = [
+                    "rs", "js", "ts", "jsx", "tsx", "py", "java", "go", "c", "cpp", "h", "hpp", "rb",
+                    "php", "swift", "kt", "dart", "cs", "sh", "bash", "sql", "lua", "scala", "r", "zig",
+                    "html", "htm", "css", "scss", "sass",
+                ];
+                supported_extensions.iter().any(|ext| *ext == ext_str.as_ref())
+            }
         } else {
             false
         }
@@ -1096,6 +1124,44 @@ mod tests {
 
         assert!(files.iter().any(|p| p.file_name() == Some(std::ffi::OsStr::new("kept.rs"))));
         assert!(!files.iter().any(|p| p.file_name() == Some(std::ffi::OsStr::new("ignored.rs"))));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_path_uses_stdin_file_path() {
+        let config = ConfigBuilder::new()
+            .stdin_file_path(Some("src/main.rs".to_string()))
+            .build();
+        let linter = Linter::new(&config);
+        let temp_path = Path::new("/tmp/lint_stdin_12345.rs");
+        assert_eq!(linter.effective_path(temp_path), Path::new("src/main.rs"));
+
+        let normal_path = Path::new("/tmp/other.rs");
+        assert_eq!(linter.effective_path(normal_path), normal_path);
+    }
+
+    #[test]
+    fn test_stdin_file_path_per_file_ignores() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let stdin_temp = temp_dir.path().join("lint_stdin_12345.rs");
+        std::fs::write(&stdin_temp, "let x = 5;   \n")?;
+
+        let mut per_file_ignores = HashMap::new();
+        per_file_ignores.insert("src/**/*.rs".to_string(), vec!["trailing-whitespace".to_string()]);
+
+        let config = ConfigBuilder::new()
+            .paths(vec![stdin_temp.clone()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .per_file_ignores(per_file_ignores)
+            .stdin_file_path(Some("src/main.rs".to_string()))
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(&stdin_temp)?;
+
+        assert!(result.messages.is_empty(), "per-file ignores should match stdin_file_path");
+        assert_eq!(result.file_path, PathBuf::from("src/main.rs"));
 
         Ok(())
     }

@@ -143,6 +143,12 @@ lint lint . --exclude vendor --exclude "*.min.js"
 # Don't fail when a glob pattern doesn't match any files
 lint lint "nonexistent/**/*.rs" --no-error-on-unmatched-pattern
 
+# Treat warnings as errors (exit 1 on any warning)
+lint lint . --deny-warnings
+
+# Exit non-zero even if all violations were fixed
+lint lint . --fix --exit-non-zero-on-fix
+
 # Lint code from stdin (useful for editor integrations)
 echo 'let x = 5;   ' | lint lint --stdin --stdin-filename test.rs
 

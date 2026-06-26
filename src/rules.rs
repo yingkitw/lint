@@ -218,6 +218,27 @@ impl Rule for NoEmptyFileRule {
     }
 }
 
+fn collapse_empty_lines(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result = Vec::new();
+    let mut prev_empty = false;
+
+    for line in lines {
+        let is_empty = line.trim().is_empty();
+        if is_empty && prev_empty {
+            continue;
+        }
+        result.push(line);
+        prev_empty = is_empty;
+    }
+
+    let mut output = result.join("\n");
+    if content.ends_with('\n') || content.ends_with("\r\n") {
+        output.push('\n');
+    }
+    output
+}
+
 #[derive(Debug, Clone)]
 pub struct NoConsecutiveEmptyLinesRule;
 
@@ -234,6 +255,7 @@ impl Rule for NoConsecutiveEmptyLinesRule {
         let mut messages = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
         let mut prev_empty = false;
+        let mut had_consecutive = false;
 
         for (i, line) in lines.iter().enumerate() {
             let is_empty = line.trim().is_empty();
@@ -246,8 +268,20 @@ impl Rule for NoConsecutiveEmptyLinesRule {
                     self.name().to_string(),
                     Some("Remove extra blank lines; files should not contain more than one consecutive empty line.".to_string()),
                 ));
+                had_consecutive = true;
             }
             prev_empty = is_empty;
+        }
+
+        if had_consecutive {
+            let fixed = collapse_empty_lines(content);
+            if let Some(first) = messages.first_mut() {
+                first.fix = Some(crate::output::Fix {
+                    line: 0,
+                    replacement: fixed,
+                    is_safe: true,
+                });
+            }
         }
 
         messages
@@ -347,14 +381,23 @@ impl Rule for NoMixedLineEndingsRule {
             }
         }
         if has_crlf && has_lf {
-            vec![LintMessage::new(
-                1,
-                1,
-                Severity::Warning,
-                "Mixed line endings detected (both CRLF and LF)".to_string(),
-                self.name().to_string(),
-                Some("Use consistent line endings. Prefer LF (\n) for cross-platform compatibility.".to_string()),
-            )]
+            let fixed = content.replace("\r\n", "\n");
+            vec![{
+                let mut msg = LintMessage::new(
+                    1,
+                    1,
+                    Severity::Warning,
+                    "Mixed line endings detected (both CRLF and LF)".to_string(),
+                    self.name().to_string(),
+                    Some("Use consistent line endings. Prefer LF (\n) for cross-platform compatibility.".to_string()),
+                );
+                msg.fix = Some(crate::output::Fix {
+                    line: 0,
+                    replacement: fixed,
+                    is_safe: true,
+                });
+                msg
+            }]
         } else {
             Vec::new()
         }
@@ -740,5 +783,41 @@ mod tests {
         let messages = rule.check("line one\nline two\r\n", Path::new("test.rs"));
         assert_eq!(messages.len(), 1);
         assert!(messages[0].message.contains("Mixed line endings"));
+    }
+
+    #[test]
+    fn test_no_mixed_line_endings_fix() {
+        let rule = NoMixedLineEndingsRule;
+        let content = "line one\nline two\r\nline three\r\n";
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        let fix = messages[0].fix.as_ref().unwrap();
+        assert_eq!(fix.line, 0);
+        assert_eq!(fix.replacement, "line one\nline two\nline three\n");
+    }
+
+    #[test]
+    fn test_no_consecutive_empty_lines_fix() {
+        let rule = NoConsecutiveEmptyLinesRule;
+        let content = "line one\n\n\nline two\n\n\n\nline three\n";
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert!(!messages.is_empty());
+        let fix = messages[0].fix.as_ref().unwrap();
+        assert_eq!(fix.line, 0);
+        assert_eq!(fix.replacement, "line one\n\nline two\n\nline three\n");
+    }
+
+    #[test]
+    fn test_apply_fixes_full_content() {
+        let mut result = crate::output::LintResult::new(
+            PathBuf::from("test.rs"),
+            "line one\n\n\nline two\n".to_string(),
+        );
+        let rule = NoConsecutiveEmptyLinesRule;
+        for msg in rule.check("line one\n\n\nline two\n", Path::new("test.rs")) {
+            result.add_message(msg);
+        }
+        assert!(result.apply_fixes());
+        assert_eq!(result.file_content, "line one\n\nline two\n");
     }
 }

@@ -12,6 +12,12 @@ pub struct LintResult {
 pub struct Fix {
     pub line: usize,
     pub replacement: String,
+    #[serde(default = "default_true")]
+    pub is_safe: bool,
+}
+
+pub fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +72,7 @@ impl LintMessage {
         self.fix = Some(Fix {
             line: self.line,
             replacement,
+            is_safe: true,
         });
         self
     }
@@ -104,6 +111,13 @@ impl LintResult {
 
         if fixes.is_empty() {
             return false;
+        }
+
+        // Full-content fixes (line == 0) replace the entire file content
+        let full_content_fixes: Vec<_> = fixes.iter().filter(|f| f.line == 0).cloned().collect();
+        if !full_content_fixes.is_empty() {
+            self.file_content = full_content_fixes[0].replacement.clone();
+            return true;
         }
 
         fixes.sort_by_key(|f| f.line);

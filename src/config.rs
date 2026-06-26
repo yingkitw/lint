@@ -6,15 +6,32 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub paths: Vec<PathBuf>,
+    #[serde(default)]
     pub ignore_patterns: Vec<String>,
     pub max_line_length: Option<usize>,
+    #[serde(default)]
     pub rule_set: RuleSetConfig,
+    #[serde(default)]
     pub output_format: OutputFormat,
+    #[serde(default)]
     pub per_file_ignores: HashMap<String, Vec<String>>,
+    #[serde(default)]
     pub severity_overrides: HashMap<String, Severity>,
     pub extends: Option<String>,
+    #[serde(default)]
     pub ignore_suppressions: bool,
+    #[serde(default)]
     pub cache_strategy: CacheStrategy,
+    pub stdin_file_path: Option<String>,
+    #[serde(default)]
+    pub force_exclude: bool,
+    pub ext: Option<Vec<String>>,
+    #[serde(default)]
+    pub preview: bool,
+    #[serde(default = "crate::output::default_true")]
+    pub show_source: bool,
+    #[serde(default)]
+    pub no_gitignore: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,10 +40,25 @@ pub enum CacheStrategy {
     Content,
 }
 
+impl Default for CacheStrategy {
+    fn default() -> Self {
+        CacheStrategy::Metadata
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleSetConfig {
     pub enabled_rules: Vec<String>,
     pub custom_rules_path: Option<PathBuf>,
+}
+
+impl Default for RuleSetConfig {
+    fn default() -> Self {
+        Self {
+            enabled_rules: Vec::new(),
+            custom_rules_path: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +71,13 @@ pub enum OutputFormat {
     Junit,
     Concise,
     Gitlab,
+    Grouped,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        OutputFormat::Text
+    }
 }
 
 pub struct ConfigBuilder {
@@ -52,6 +91,12 @@ pub struct ConfigBuilder {
     extends: Option<String>,
     ignore_suppressions: bool,
     cache_strategy: CacheStrategy,
+    stdin_file_path: Option<String>,
+    force_exclude: bool,
+    ext: Option<Vec<String>>,
+    preview: bool,
+    show_source: bool,
+    no_gitignore: bool,
 }
 
 impl ConfigBuilder {
@@ -79,6 +124,12 @@ impl ConfigBuilder {
             extends: None,
             ignore_suppressions: false,
             cache_strategy: CacheStrategy::Metadata,
+            stdin_file_path: None,
+            force_exclude: false,
+            ext: None,
+            preview: false,
+            show_source: true,
+            no_gitignore: false,
         }
     }
 
@@ -137,6 +188,36 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn stdin_file_path(mut self, path: Option<String>) -> Self {
+        self.stdin_file_path = path;
+        self
+    }
+
+    pub fn force_exclude(mut self, value: bool) -> Self {
+        self.force_exclude = value;
+        self
+    }
+
+    pub fn ext(mut self, ext: Option<Vec<String>>) -> Self {
+        self.ext = ext;
+        self
+    }
+
+    pub fn preview(mut self, value: bool) -> Self {
+        self.preview = value;
+        self
+    }
+
+    pub fn show_source(mut self, value: bool) -> Self {
+        self.show_source = value;
+        self
+    }
+
+    pub fn no_gitignore(mut self, value: bool) -> Self {
+        self.no_gitignore = value;
+        self
+    }
+
     pub fn build(self) -> Config {
         Config {
             paths: self.paths,
@@ -149,6 +230,12 @@ impl ConfigBuilder {
             extends: self.extends,
             ignore_suppressions: self.ignore_suppressions,
             cache_strategy: self.cache_strategy,
+            stdin_file_path: self.stdin_file_path,
+            force_exclude: self.force_exclude,
+            ext: self.ext,
+            preview: self.preview,
+            show_source: self.show_source,
+            no_gitignore: self.no_gitignore,
         }
     }
 }
@@ -241,10 +328,17 @@ mod tests {
             extends: None,
             ignore_suppressions: false,
             cache_strategy: CacheStrategy::Metadata,
+            stdin_file_path: Some("src/main.rs".to_string()),
+            force_exclude: false,
+            ext: None,
+            preview: false,
+            show_source: true,
+            no_gitignore: false,
         };
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.paths.len(), 1);
+        assert_eq!(parsed.stdin_file_path, Some("src/main.rs".to_string()));
     }
 }

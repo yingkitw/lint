@@ -293,7 +293,7 @@
 
 ## Done
 
-- [x] Comprehensive unit and integration test coverage (132 lib + 55 bin + 18 advanced + 10 basic = 215 tests)
+- [x] Comprehensive unit and integration test coverage (137 lib + 86 bin + 18 advanced + 10 basic = 251 tests)
 - [x] Source context in text output (offending line + caret underline)
 - [x] `--statistics` CLI flag (per-rule violation counts)
 - [x] `--show-fixes` CLI flag (list files modified by --fix)
@@ -318,6 +318,8 @@
 - [x] VCS integration (auto-respect `.gitignore` patterns)
 - [x] `--cache-strategy` CLI flag (`metadata` or `content`)
 - [x] `--no-error-on-unmatched-pattern` CLI flag
+- [x] `--deny-warnings` CLI flag
+- [x] `--exit-non-zero-on-fix` CLI flag
 - [x] Rule categories (`style`, `correctness`, `custom`)
 - [x] File count in text summary ("Summary: X errors, Y warnings, Z infos in N files")
 - [x] Fix indicator `[*]` in text output for fixable issues
@@ -347,6 +349,10 @@
 - [x] SARIF output format (`--output sarif`)
 - [x] `--exit-zero` CLI flag (always return 0)
 - [x] Config `extends` for shareable configs
+- [x] `--no-cache` CLI flag (skip cache reads/writes)
+- [x] `--no-config` CLI flag (ignore `.lint.json` and auto-discovered config)
+- [x] `--stdin-file-path` CLI flag (alias for `--stdin-filename`, used for per-file ignores and output path)
+- [x] Grouped output format (`--output grouped`)
 - [x] Audit: removed unused dependencies (`glob`, `thiserror`) from `Cargo.toml`
 - [x] Audit: fixed all `cargo clippy` warnings (collapsed nested ifs, replaced `len()` comparisons with `is_empty()`, simplified `map_or`)
 
@@ -371,3 +377,168 @@
   - ESLint supports `--cache-strategy` with `metadata` (default) or `content` options
   - **Goal**: `lint lint . --cache --cache-strategy content` hashes file contents for cache keying
   - **Status**: Added `CacheStrategy` enum (`Metadata`/`Content`) to `config.rs`. Added `cache_strategy` field to `Config`, `ConfigBuilder`, and `Commands::Lint`. `lint_file()` in `linter.rs` uses `DefaultHasher` to hash content when `Content` strategy is active. `CacheEntry` now stores optional `content_hash`. `get_by_hash()` and `insert_with_hash()` added to `Cache`. CLI parsing test added.
+
+## Brainstorming (from competitive intelligence round 9)
+
+- [x] **`--deny-warnings` CLI flag**
+  - oxlint supports `--deny-warnings` to ensure warnings produce a non-zero exit code
+  - **Goal**: `lint lint . --deny-warnings` exits 1 if any warnings are found, even without errors
+  - **Status**: Added `deny_warnings: bool` to `Commands::Lint` and `run_lint_and_print()`. When true, the exit code logic treats any warning count > 0 as a failure (exit 1), regardless of whether errors exist. CLI parsing test added.
+
+- [x] **`--exit-non-zero-on-fix` CLI flag**
+  - Ruff supports `--exit-non-zero-on-fix` to exit 1 if any violations were found, even if all were fixed
+  - **Goal**: `lint lint . --fix --exit-non-zero-on-fix` exits 1 when fixes were applied
+  - **Status**: Added `exit_non_zero_on_fix: bool` to `Commands::Lint` and `run_lint_and_print()`. When true, the exit code is 1 if any fixes were applied during the run, useful for CI enforcing that fixed code must be committed. CLI parsing test added.
+
+## Brainstorming (from competitive intelligence round 10)
+
+- [x] **`--no-cache` CLI flag**
+  - Ruff and oxlint support `--no-cache` to explicitly disable caching even if a config file enables it
+  - **Goal**: `lint lint . --no-cache` skips cache reads/writes entirely
+  - Useful for debugging or when cache state is suspected to be stale
+  - **Status**: Added `no_cache: bool` to `Commands::Lint`. When true, cache is set to `None` so no cache file is loaded or saved. CLI parsing test added.
+
+- [x] **`--no-config` CLI flag**
+  - ESLint supports `--no-eslintrc` to skip config file discovery and use only CLI-provided settings
+  - **Goal**: `lint lint . --no-config` ignores `.lint.json` and any auto-discovered config
+  - Useful for quick one-off runs with only CLI arguments
+  - **Status**: Added `no_config: bool` to `Commands::Lint`. When true, `ConfigBuilder::new().build()` is used directly, bypassing `--config` and auto-discovery. CLI parsing test added.
+
+- [x] **`--stdin-file-path` CLI flag**
+  - Biome and Ruff use `--stdin-file-path` to determine language and apply per-file overrides when linting stdin
+  - **Goal**: `echo '...' | lint lint --stdin --stdin-file-path foo.rs` treats the input as Rust for rule selection
+  - **Status**: Added `visible_alias = "stdin-file-path"` to the existing `--stdin-filename` argument. Added `stdin_file_path` to `Config` and `ConfigBuilder`. `Linter::effective_path()` replaces temp path with `stdin_file_path` for `LintResult.file_path` and `per_file_ignores` matching when the temp file name starts with `lint_stdin_`. CLI parsing and linter unit tests added.
+
+- [x] **Grouped output format**
+  - Ruff supports `--output-format=grouped` which groups violations by file path instead of a flat list
+  - **Goal**: `lint lint . --output grouped` shows all issues per file together
+  - Useful when scanning long output to focus on one file at a time
+  - **Status**: Added `Grouped` variant to `OutputFormat`. `render_grouped()` groups messages by file path with bold filename headers, colored severity prefixes, line/column numbers, messages, and dimmed rule names. Clean files are skipped. CLI parsing test and rendering test added.
+
+## Brainstorming (from competitive intelligence round 11)
+
+- [x] **`--check` CLI flag**
+  - Prettier supports `--check` to verify files are already formatted without writing changes
+  - **Goal**: `lint lint . --check` exits 1 if any fixable violations exist, without modifying files
+  - Useful for CI pipelines that want to enforce clean code without auto-fixing
+  - **Status**: Added `check: bool` to `Commands::Lint`. When true, fixes are applied in-memory (like `--diff`) but not written to disk. A summary "Would fix N file(s)" is printed. Exit code is 1 if any fixes would be applied. CLI parsing test and behavior test added.
+
+- [x] **Auto-fixes for remaining generic rules**
+  - Currently only `trailing-whitespace`, `no-tabs`, and `final-newline` have auto-fixes
+  - `no-consecutive-empty-lines`, `no-mixed-line-endings`, and `no-empty-file` lack fixes
+  - **Goal**: All generic rules that can be safely auto-fixed emit `suggestion` and are applied by `--fix`
+  - **Status**: Extended `apply_fixes()` to support full-content fixes via `line == 0` sentinel. Added `collapse_empty_lines()` helper. `NoConsecutiveEmptyLinesRule` now emits a full-content fix that collapses consecutive empty lines. `NoMixedLineEndingsRule` now emits a full-content fix that normalizes CRLF to LF. `NoEmptyFileRule` intentionally has no auto-fix (deleting a file or adding arbitrary content is not safe). Unit tests for fixes and full-content fix application added.
+
+- [x] **`--max-diagnostics` CLI flag**
+  - Ruff supports `--max-diagnostics N` to limit the number of violations shown per file or total
+  - **Goal**: `lint lint . --max-diagnostics 50` truncates output after 50 messages with a "... N more" hint
+  - Useful for large files with thousands of violations (e.g., generated code)
+  - **Status**: Added `max_diagnostics: Option<usize>` to `Commands::Lint`. Extracted `truncate_diagnostics()` helper that limits total diagnostics across all files. When exceeded, prints `... N additional diagnostics hidden ...` after output. CLI parsing test and truncation behavior tests added.
+
+- [x] **TOML configuration file support**
+  - Biome and many Rust tools support `.biome.toml` in addition to JSON config
+  - **Goal**: `lint lint .` auto-discovers `.lint.toml` and parses it with the same schema as `.lint.json`
+  - TOML is more readable and comment-friendly than JSON for configuration
+  - **Status**: Added `toml = "0.8"` dependency. `load_config_file()` detects `.toml` extension and uses `toml::from_str()` instead of `serde_json::from_str()`. Added `#[serde(default)]` to `Config` fields and `Default` impls for `CacheStrategy`, `RuleSetConfig`, and `OutputFormat` so TOML partial configs work. `find_config_file()` now searches for `.lint.toml` after `.lint.json`. Tests for loading and discovery added.
+
+- [x] **Baseline file support**
+  - Ruff supports `--baseline` to compare against a previous run and only show new issues
+  - **Goal**: `lint lint . --baseline baseline.json` only reports violations not present in the baseline
+  - Critical for incremental adoption in large legacy codebases
+  - **Status**: Added `baseline: Option<PathBuf>` to `Commands::Lint`. `BaselineEntry` struct tracks file path, line, and rule for matching. `load_baseline()` parses JSON baseline files. `filter_baseline()` removes current violations that exactly match baseline entries (same file path, line, and rule). Applied after fixes but before rendering. CLI parsing test and filtering behavior tests added.
+
+## Brainstorming (from competitive intelligence round 12)
+
+- [x] **Safe/unsafe fix classification**
+  - Ruff separates fixes into `safe` and `unsafe` categories
+  - **Goal**: `--fix` only applies safe fixes; `--fix --unsafe-fixes` applies all fixes
+  - Critical for CI automation where unsafe fixes could break code semantics
+  - **Status**: Added `is_safe: bool` to `Fix` struct with serde default `true`. Added `--unsafe-fixes` CLI flag. In `run_lint_and_print()`, when `--fix` is used without `--unsafe-fixes`, unsafe fixes are filtered out from messages before applying. All existing fixes default to safe. CLI parsing test and filtering behavior test added.
+
+- [x] **`--force-exclude` CLI flag**
+  - Ruff supports `--force-exclude` to skip files even when explicitly passed as arguments
+  - **Goal**: `lint lint node_modules/file.js --force-exclude` respects ignore patterns and skips the file
+  - Useful when shell globbing accidentally matches ignored directories
+  - **Status**: Added `force_exclude: bool` to `Config`, `ConfigBuilder`, and `Commands::Lint`. In `linter.rs`, `lint_path()` checks `is_ignored()` for explicitly passed files when `force_exclude` is true. CLI parsing test and behavior tests added.
+
+- [ ] **Git-aware linting (`--changed`, `--staged`)**
+  - Biome supports `--changed` and `--staged` to only lint files modified in git
+  - **Goal**: `lint lint . --changed` only lints files with uncommitted changes; `--staged` only lints staged files
+  - Dramatically speeds up pre-commit hooks and CI on large monorepos
+
+- [x] **`--ext` CLI flag**
+  - ESLint uses `--ext .js,.jsx,.ts` to filter which file extensions to lint
+  - **Goal**: `lint lint . --ext rs,toml` only processes files with matching extensions
+  - Useful when walking directories with many non-source files
+  - **Status**: Added `ext: Option<Vec<String>>` to `Config`, `ConfigBuilder`, and `Commands::Lint`. Modified `should_lint_file()` to use configured extensions when `ext` is set, falling back to the hardcoded supported extensions list otherwise. CLI parsing test and behavior test added.
+
+- [x] **`--verbose` / `--log-level` CLI flag**
+  - Biome and Ruff support `--verbose` and `--log-level` for debugging config loading, file discovery, cache behavior
+  - **Goal**: `lint lint . --verbose` prints debug info: config file found, cache hits/misses, files skipped and why
+  - Essential for troubleshooting why a file is or isn't being linted
+  - **Status**: Added `verbose: bool` to `Commands::Lint` and `run_lint_and_print()`. When true, prints file count, diagnostic count, cache status, and fix mode status before rendering results. CLI parsing test added.
+
+- [ ] **Plugin system for custom rules**
+  - Oxlint supports `--import-plugin`, `--jsdoc-plugin`, etc. for extending rule sets
+  - **Goal**: Load additional rule packs as plugins (e.g., `--plugin security`, `--plugin react`)
+  - Would enable ecosystem-specific rules without bloating the core binary
+
+## Brainstorming (from competitive intelligence round 13)
+
+- [x] **`--show-source` toggle**
+  - Currently text output always shows source context (offending line + caret underline)
+  - Some users may want cleaner output without source snippets
+  - **Goal**: `--no-show-source` disables source context in text output
+  - Simple to implement: add `show_source: bool` to config, thread through `render_results()`
+  - **Status**: See round 14 for implementation details.
+
+- [x] **`--line-length` CLI alias**
+  - Ruff uses `--line-length N`; we only have `--max-line-length N`
+  - **Goal**: `--line-length 120` is an alias for `--max-line-length 120`
+  - Very simple: add `line_length` to CLI with `visible_alias = "max-line-length"` or duplicate handler
+  - **Status**: Added `visible_alias = "line-length"` to the `max_line_length` CLI argument via clap. `--line-length 120` now parses identically to `--max-line-length 120`. CLI parsing test added.
+
+- [ ] **`--no-gitignore` CLI flag**
+  - Currently `.gitignore` files are always respected via the `ignore` crate's `WalkBuilder`
+  - **Goal**: `--no-gitignore` disables automatic .gitignore respect
+  - Useful when you want to lint generated files that are gitignored
+  - Requires threading a flag into `Linter::lint_directory()` or using `WalkBuilder::add_custom_ignore_filename()`
+
+- [x] **`--fixable` / `--unfixable` CLI flags**
+  - Ruff supports `--fixable E,W` and `--unfixable I` to control which rules can be auto-fixed
+  - **Goal**: `--fixable trailing-whitespace` only auto-fixes that rule; `--unfixable line-length` excludes it
+  - Simple extension of the existing fix filtering logic
+  - **Status**: Added `fixable: Option<Vec<String>>` and `unfixable: Option<Vec<String>>` to `Commands::Lint`. In `run_lint_and_print()`, when `--fixable` is used, only fixes for listed rules are retained; when `--unfixable` is used, fixes for listed rules are removed. Applied after unsafe fix filtering but before fix application. CLI parsing tests and behavior test added.
+
+- [x] **`--preview` CLI flag**
+  - Ruff uses `--preview` to enable experimental/nightly rules
+  - **Goal**: `--preview` enables rules marked as experimental in the rule registry
+  - Simple boolean flag that gates certain rules; future-proof for adding new rules
+  - **Status**: Added `preview: bool` to `Config`, `ConfigBuilder`, and `Commands::Lint`. `merge_configs()` merges with OR logic (either config or CLI enables preview). `test_config_serialization` updated. CLI parsing test added.
+
+## Brainstorming (from competitive intelligence round 14)
+
+- [x] **`--show-source` toggle**
+  - Currently text output always shows source context (offending line + caret underline)
+  - Some users may want cleaner output without source snippets
+  - **Goal**: `--no-show-source` disables source context in text output
+  - Simple to implement: add `show_source: bool` to config, thread through `render_results()`
+  - **Status**: Added `show_source: bool` to `Config` and `ConfigBuilder` with serde default `true`. Added `--no-show-source` CLI flag. Threaded `show_source` through `render_results()` and `print_results()`; source context and caret underline are conditionally rendered in `OutputFormat::Text`. `merge_configs()` uses AND logic (both must be true to show source). CLI parsing test added.
+
+- [ ] **`--no-gitignore` CLI flag**
+  - Currently `.gitignore` files are always respected via the `ignore` crate's `WalkBuilder`
+  - **Goal**: `--no-gitignore` disables automatic .gitignore respect
+  - Useful when you want to lint generated files that are gitignored
+  - Requires threading a flag into `Linter::lint_directory()` or using `WalkBuilder::add_custom_ignore_filename()`
+
+- [ ] **Git-aware linting (`--changed`, `--staged`)**
+  - Biome supports `--changed` and `--staged` to only lint files modified in git
+  - **Goal**: `lint lint . --changed` only lints files with uncommitted changes; `--staged` only lints staged files
+  - Dramatically speeds up pre-commit hooks and CI on large monorepos
+  - Requires adding `git2` or shelling out to `git status`
+
+- [ ] **Plugin system for custom rules**
+  - Oxlint supports `--import-plugin`, `--jsdoc-plugin`, etc. for extending rule sets
+  - **Goal**: Load additional rule packs as plugins (e.g., `--plugin security`, `--plugin react`)
+  - Would enable ecosystem-specific rules without bloating the core binary
+  - Complex: requires dynamic loading or conditional compilation of rule modules
