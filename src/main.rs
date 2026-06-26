@@ -5,6 +5,7 @@ use lint::config::CacheStrategy;
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
 #[command(name = "lint")]
@@ -167,88 +168,91 @@ enum Commands {
     Init,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_lint_and_print(
-    config: &lint::Config,
+struct RunOptions<'a> {
     fix: bool,
-    output_format: &lint::OutputFormat,
-    cache: Option<&std::sync::Mutex<lint::cache::Cache>>,
+    fix_only: bool,
+    diff: bool,
+    check: bool,
     quiet: bool,
-    max_warnings: Option<usize>,
-    output_file: Option<&PathBuf>,
-    exit_zero: bool,
+    verbose: bool,
     statistics: bool,
     show_fixes: bool,
-    diff: bool,
-    fix_only: bool,
     add_noqa: bool,
-    deny_warnings: bool,
+    exit_zero: bool,
     exit_non_zero_on_fix: bool,
-    check: bool,
-    max_diagnostics: Option<usize>,
-    baseline: Option<&PathBuf>,
-    verbose: bool,
+    deny_warnings: bool,
     unsafe_fixes: bool,
-    fixable: Option<&[String]>,
-    unfixable: Option<&[String]>,
+    max_warnings: Option<usize>,
+    max_diagnostics: Option<usize>,
+    output_format: &'a lint::OutputFormat,
+    output_file: Option<&'a PathBuf>,
+    baseline: Option<&'a PathBuf>,
+    fixable: Option<&'a [String]>,
+    unfixable: Option<&'a [String]>,
+}
+
+impl<'a> RunOptions<'a> {
+    fn effective_fix(&self) -> bool {
+        self.fix || self.fix_only
+    }
+}
+
+fn run_lint_and_print(
+    config: &lint::Config,
+    cache: Option<Arc<Mutex<lint::cache::Cache>>>,
+    opts: RunOptions,
 ) -> anyhow::Result<i32> {
-    let cache_arc = cache.map(|c| std::sync::Arc::new(std::sync::Mutex::new(c.lock().unwrap().clone())));
-    let mut results = if let Some(ref c) = cache_arc {
+    let mut results = if let Some(ref c) = cache {
         lint::lint_files_with_cache(config, Some(c.clone()))?
     } else {
         lint::lint_files(config)?
     };
 
-    let effective_fix = fix || fix_only;
+    let effective_fix = opts.effective_fix();
 
     // When --fix is used without --unsafe-fixes, filter out unsafe fixes
-    if effective_fix && !unsafe_fixes {
+    if effective_fix && !opts.unsafe_fixes {
         for result in &mut results {
             for msg in &mut result.messages {
-                if let Some(ref fix) = msg.fix {
-                    if !fix.is_safe {
+                if let Some(ref fix) = msg.fix
+                    && !fix.is_safe {
                         msg.fix = None;
                     }
-                }
             }
         }
     }
 
     // Apply --fixable and --unfixable filtering
-    if let Some(ref rules) = fixable {
+    if let Some(rules) = opts.fixable {
         let allowed: std::collections::HashSet<&String> = rules.iter().collect();
         for result in &mut results {
             for msg in &mut result.messages {
-                if let Some(ref fix) = msg.fix {
-                    if !allowed.contains(&msg.rule) {
-                        msg.fix = None;
-                    }
+                if msg.fix.is_some() && !allowed.contains(&msg.rule) {
+                    msg.fix = None;
                 }
             }
         }
     }
-    if let Some(ref rules) = unfixable {
+    if let Some(rules) = opts.unfixable {
         let denied: std::collections::HashSet<&String> = rules.iter().collect();
         for result in &mut results {
             for msg in &mut result.messages {
-                if let Some(ref _fix) = msg.fix {
-                    if denied.contains(&msg.rule) {
-                        msg.fix = None;
-                    }
+                if msg.fix.is_some() && denied.contains(&msg.rule) {
+                    msg.fix = None;
                 }
             }
         }
     }
 
     let mut fixed_files = Vec::new();
-    if effective_fix || diff || check {
+    if effective_fix || opts.diff || opts.check {
         let mut fixed_count = 0;
         for result in &mut results {
             let original = result.file_content.clone();
             if result.apply_fixes() {
                 fixed_count += 1;
                 fixed_files.push(result.file_path.display().to_string());
-                if diff {
+                if opts.diff {
                     let original_lines: Vec<&str> = original.lines().collect();
                     let fixed_lines: Vec<&str> = result.file_content.lines().collect();
                     println!("--- {}", result.file_path.display());
@@ -266,19 +270,19 @@ fn run_lint_and_print(
                             }
                         }
                     }
-                } else if !check {
+                } else if !opts.check {
                     std::fs::write(&result.file_path, &result.file_content)?;
                 }
             }
         }
-        if fixed_count > 0 && !diff && !check {
+        if fixed_count > 0 && !opts.diff && !opts.check {
             println!("Fixed {} file(s)", fixed_count);
-        } else if check && fixed_count > 0 {
+        } else if opts.check && fixed_count > 0 {
             println!("Would fix {} file(s)", fixed_count);
         }
     }
 
-    if add_noqa {
+    if opts.add_noqa {
         let mut noqa_count = 0;
         for result in &mut results {
             let mut lines: Vec<String> = result.file_content.lines().map(|s| s.to_string()).collect();
@@ -307,7 +311,7 @@ fn run_lint_and_print(
         }
     }
 
-    if verbose && !quiet {
+    if opts.verbose && !opts.quiet {
         let total_files = results.len();
         let total_messages: usize = results.iter().map(|r| r.messages.len()).sum();
         println!("Linting {} file(s), found {} diagnostic(s)", total_files, total_messages);
@@ -316,44 +320,44 @@ fn run_lint_and_print(
         } else {
             println!("Cache: disabled");
         }
-        if fix {
+        if opts.fix {
             println!("Fix mode: enabled");
         }
-        if fix_only {
+        if opts.fix_only {
             println!("Fix-only mode: enabled");
         }
     }
 
-    if let Some(baseline_path) = baseline {
+    if let Some(baseline_path) = opts.baseline {
         let baseline_entries = load_baseline(baseline_path)?;
         filter_baseline(&mut results, &baseline_entries);
     }
 
-    let hidden_diagnostics = truncate_diagnostics(&mut results, max_diagnostics);
+    let hidden_diagnostics = truncate_diagnostics(&mut results, opts.max_diagnostics);
 
-    if !fix_only {
-        if let Some(path) = output_file {
+    if !opts.fix_only {
+        if let Some(path) = opts.output_file {
             colored::control::set_override(false);
-            let output = render_results(&results, output_format.clone(), quiet, config.show_source);
+            let output = render_results(&results, opts.output_format, opts.quiet, config.show_source);
             colored::control::unset_override();
             std::fs::write(path, output)?;
         } else {
-            print_results(&results, output_format.clone(), quiet, config.show_source);
+            print_results(&results, opts.output_format, opts.quiet, config.show_source);
         }
     }
 
-    if hidden_diagnostics > 0 && !quiet && !fix_only {
+    if hidden_diagnostics > 0 && !opts.quiet && !opts.fix_only {
         println!("... {} additional diagnostics hidden ...", hidden_diagnostics);
     }
 
-    if show_fixes && !fixed_files.is_empty() && !quiet && !fix_only {
+    if opts.show_fixes && !fixed_files.is_empty() && !opts.quiet && !opts.fix_only {
         println!("\n{}", "Fixed files:".bold());
         for file in &fixed_files {
             println!("  {}", file);
         }
     }
 
-    if statistics && !quiet && !fix_only {
+    if opts.statistics && !opts.quiet && !opts.fix_only {
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for result in &results {
             for msg in &result.messages {
@@ -375,12 +379,12 @@ fn run_lint_and_print(
         .iter()
         .map(|r| r.messages.iter().filter(|m| m.severity == lint::Severity::Warning).count())
         .sum();
-    let max_warnings_exceeded = max_warnings.is_some_and(|max| warning_count > max);
+    let max_warnings_exceeded = opts.max_warnings.is_some_and(|max| warning_count > max);
     let any_fixes_applied = !fixed_files.is_empty();
 
-    Ok(if fix_only || exit_zero {
+    Ok(if opts.fix_only || opts.exit_zero {
         0
-    } else if has_errors || max_warnings_exceeded || (deny_warnings && warning_count > 0) || (exit_non_zero_on_fix && any_fixes_applied) || (check && any_fixes_applied) {
+    } else if has_errors || max_warnings_exceeded || (opts.deny_warnings && warning_count > 0) || (opts.exit_non_zero_on_fix && any_fixes_applied) || (opts.check && any_fixes_applied) {
         1
     } else {
         0
@@ -404,7 +408,7 @@ fn load_baseline(path: &PathBuf) -> anyhow::Result<Vec<BaselineEntry>> {
 
 fn filter_baseline(results: &mut [lint::LintResult], baseline: &[BaselineEntry]) {
     for result in results.iter_mut() {
-        let file_str = result.file_path.to_string_lossy().to_string();
+        let file_str = result.file_path.to_string_lossy();
         result.messages.retain(|msg| {
             !baseline.iter().any(|entry| {
                 entry.file == file_str && entry.line == msg.line && entry.rule == msg.rule
@@ -714,12 +718,12 @@ fn main() -> anyhow::Result<()> {
             config.output_format = output_format.clone();
 
             let cache_path = cache_location.unwrap_or_else(|| std::path::PathBuf::from(".lint_cache.json"));
-            let cache = if no_cache {
+            let cache: Option<std::sync::Arc<std::sync::Mutex<lint::cache::Cache>>> = if no_cache {
                 None
             } else if cache {
                 match lint::cache::Cache::load(&cache_path) {
-                    Ok(c) => Some(std::sync::Mutex::new(c)),
-                    Err(_) => Some(std::sync::Mutex::new(lint::cache::Cache::new())),
+                    Ok(c) => Some(std::sync::Arc::new(std::sync::Mutex::new(c))),
+                    Err(_) => Some(std::sync::Arc::new(std::sync::Mutex::new(lint::cache::Cache::new()))),
                 }
             } else {
                 None
@@ -727,7 +731,28 @@ fn main() -> anyhow::Result<()> {
 
             if watch {
                 println!("Watching for changes... Press Ctrl+C to stop.");
-                run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa, deny_warnings, exit_non_zero_on_fix, check, max_diagnostics, baseline.as_ref(), verbose, unsafe_fixes, fixable.as_deref(), unfixable.as_deref())?;
+                run_lint_and_print(&config, cache.clone(), RunOptions {
+                    fix,
+                    fix_only,
+                    diff,
+                    check,
+                    quiet,
+                    verbose,
+                    statistics,
+                    show_fixes,
+                    add_noqa,
+                    exit_zero,
+                    exit_non_zero_on_fix,
+                    deny_warnings,
+                    unsafe_fixes,
+                    max_warnings,
+                    max_diagnostics,
+                    output_format: &output_format,
+                    output_file: output_file.as_ref(),
+                    baseline: baseline.as_ref(),
+                    fixable: fixable.as_deref(),
+                    unfixable: unfixable.as_deref(),
+                })?;
 
                 let (tx, rx) = std::sync::mpsc::channel();
                 let mut watcher = notify::recommended_watcher(move |res| {
@@ -747,11 +772,53 @@ fn main() -> anyhow::Result<()> {
                 for event in rx {
                     if event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove() {
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa, deny_warnings, exit_non_zero_on_fix, check, max_diagnostics, baseline.as_ref(), verbose, unsafe_fixes, fixable.as_deref(), unfixable.as_deref())?;
+                        run_lint_and_print(&config, cache.clone(), RunOptions {
+                            fix,
+                            fix_only,
+                            diff,
+                            check,
+                            quiet,
+                            verbose,
+                            statistics,
+                            show_fixes,
+                            add_noqa,
+                            exit_zero,
+                            exit_non_zero_on_fix,
+                            deny_warnings,
+                            unsafe_fixes,
+                            max_warnings,
+                            max_diagnostics,
+                            output_format: &output_format,
+                            output_file: output_file.as_ref(),
+                            baseline: baseline.as_ref(),
+                            fixable: fixable.as_deref(),
+                            unfixable: unfixable.as_deref(),
+                        })?;
                     }
                 }
             } else {
-                let exit_code = run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes, diff, fix_only, add_noqa, deny_warnings, exit_non_zero_on_fix, check, max_diagnostics, baseline.as_ref(), verbose, unsafe_fixes, fixable.as_deref(), unfixable.as_deref())?;
+                let exit_code = run_lint_and_print(&config, cache.clone(), RunOptions {
+                    fix,
+                    fix_only,
+                    diff,
+                    check,
+                    quiet,
+                    verbose,
+                    statistics,
+                    show_fixes,
+                    add_noqa,
+                    exit_zero,
+                    exit_non_zero_on_fix,
+                    deny_warnings,
+                    unsafe_fixes,
+                    max_warnings,
+                    max_diagnostics,
+                    output_format: &output_format,
+                    output_file: output_file.as_ref(),
+                    baseline: baseline.as_ref(),
+                    fixable: fixable.as_deref(),
+                    unfixable: unfixable.as_deref(),
+                })?;
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }
@@ -1072,7 +1139,7 @@ fn render_grouped(results: &[lint::LintResult]) -> String {
     out
 }
 
-fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: bool, show_source: bool) -> String {
+fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bool, show_source: bool) -> String {
     match format {
         OutputFormat::Json => {
             let filtered: Vec<_> = if quiet {
@@ -1185,7 +1252,7 @@ fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: boo
                             let lines: Vec<&str> = result.file_content.lines().collect();
                             if let Some(source_line) = lines.get(msg.line.saturating_sub(1)) {
                                 out.push_str(&format!("    | {}\n", source_line));
-                                let caret = "    |".to_string() + &" ".repeat(msg.column.saturating_sub(1)) + "^";
+                                let caret = format!("    |{}^", " ".repeat(msg.column.saturating_sub(1)));
                                 out.push_str(&format!("{}\n", caret.dimmed()));
                             }
                         }
@@ -1211,7 +1278,7 @@ fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: boo
     }
 }
 
-fn print_results(results: &[lint::LintResult], format: OutputFormat, quiet: bool, show_source: bool) {
+fn print_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bool, show_source: bool) {
     print!("{}", render_results(results, format, quiet, show_source));
 }
 
@@ -2188,27 +2255,29 @@ mod tests {
 
         let exit_code = run_lint_and_print(
             &config,
-            false,                // fix
-            &lint::OutputFormat::Text,
-            None,                 // cache
-            true,                 // quiet
-            None,                 // max_warnings
-            None,                 // output_file
-            false,                // exit_zero
-            false,                // statistics
-            false,                // show_fixes
-            false,                // diff
-            false,                // fix_only
-            false,                // add_noqa
-            false,                // deny_warnings
-            false,                // exit_non_zero_on_fix
-            true,                 // check
-            None,                 // max_diagnostics
-            None,                 // baseline
-            false,                // verbose
-            false,                // unsafe_fixes
-            None,                 // fixable
-            None,                 // unfixable
+            None,
+            RunOptions {
+                fix: false,
+                fix_only: false,
+                diff: false,
+                check: true,
+                quiet: true,
+                verbose: false,
+                statistics: false,
+                show_fixes: false,
+                add_noqa: false,
+                exit_zero: false,
+                exit_non_zero_on_fix: false,
+                deny_warnings: false,
+                unsafe_fixes: false,
+                max_warnings: None,
+                max_diagnostics: None,
+                output_format: &lint::OutputFormat::Text,
+                output_file: None,
+                baseline: None,
+                fixable: None,
+                unfixable: None,
+            },
         )?;
 
         assert_eq!(exit_code, 1, "check mode should exit 1 when fixable violations exist");
@@ -2482,11 +2551,10 @@ enabled_rules = ["line-length", "no-todo"]
         // Simulate fix without unsafe_fixes
         for result in &mut results {
             for msg in &mut result.messages {
-                if let Some(ref fix) = msg.fix {
-                    if !fix.is_safe {
+                if let Some(ref fix) = msg.fix
+                    && !fix.is_safe {
                         msg.fix = None;
                     }
-                }
             }
         }
 
@@ -2545,11 +2613,10 @@ enabled_rules = ["line-length", "no-todo"]
         let allowed: std::collections::HashSet<String> = ["line-length".to_string()].into_iter().collect();
         for result in &mut results {
             for msg in &mut result.messages {
-                if let Some(ref _fix) = msg.fix {
-                    if !allowed.contains(&msg.rule) {
+                if let Some(ref _fix) = msg.fix
+                    && !allowed.contains(&msg.rule) {
                         msg.fix = None;
                     }
-                }
             }
         }
 
@@ -2600,9 +2667,6 @@ enabled_rules = ["line-length", "no-todo"]
         let ignored_file = temp_dir.path().join("ignored.rs");
         std::fs::write(&ignored_file, "let x = 5;   \n")?;
 
-        let original_dir = std::env::current_dir()?;
-        std::env::set_current_dir(temp_dir.path())?;
-
         let config = ConfigBuilder::new()
             .paths(vec![temp_dir.path().to_path_buf()])
             .enabled_rules(vec!["trailing-whitespace".to_string()])
@@ -2611,8 +2675,6 @@ enabled_rules = ["line-length", "no-todo"]
 
         let linter = lint::Linter::new(&config);
         let results = linter.run()?;
-
-        std::env::set_current_dir(original_dir)?;
 
         let ignored_result = results.iter().find(|r| r.file_path.ends_with("ignored.rs"));
         assert!(ignored_result.is_some(), "ignored.rs should be linted when --no-gitignore is used");

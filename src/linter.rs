@@ -5,7 +5,7 @@ use crate::output::{LintMessage, LintResult, Severity};
 use crate::rules::{Rule, RuleSet};
 use anyhow::{Context, Result};
 use ignore::gitignore::GitignoreBuilder;
-use ignore::{Walk, WalkBuilder};
+use ignore::WalkBuilder;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;

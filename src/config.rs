@@ -35,34 +35,26 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CacheStrategy {
+    #[default]
     Metadata,
     Content,
 }
 
-impl Default for CacheStrategy {
-    fn default() -> Self {
-        CacheStrategy::Metadata
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct RuleSetConfig {
     pub enabled_rules: Vec<String>,
     pub custom_rules_path: Option<PathBuf>,
 }
 
-impl Default for RuleSetConfig {
-    fn default() -> Self {
-        Self {
-            enabled_rules: Vec::new(),
-            custom_rules_path: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub enum OutputFormat {
+    #[default]
     Text,
     Json,
     Markdown,
@@ -74,11 +66,6 @@ pub enum OutputFormat {
     Grouped,
 }
 
-impl Default for OutputFormat {
-    fn default() -> Self {
-        OutputFormat::Text
-    }
-}
 
 pub struct ConfigBuilder {
     paths: Vec<PathBuf>,
