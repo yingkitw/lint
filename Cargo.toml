@@ -1,6 +1,6 @@
 [package]
 name = "lint"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "A versatile linting tool with CLI, MCP, and library interfaces"
 readme = "README.md"

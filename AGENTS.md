@@ -1,47 +1,128 @@
 # Agent Development Loop
 
-This document defines the continuous improvement cycle for the project.
+Autonomous development protocol for the `lint` Rust project. Designed to drive multi-session work toward a defined milestone without human interaction.
+
+---
+
+## Milestone Definition
+
+Before starting autonomous work, a milestone must be explicitly defined in `TODO.md` under a `## Milestone: <Name>` heading. A milestone is complete when:
+
+1. All `[ ]` items under it are checked `[x]`.
+2. `cargo test` passes (all targets, all features).
+3. `cargo clippy --all-targets --all-features` is clean (or justified suppressions).
+4. `cargo fmt --check` passes.
+5. `README.md`, `SPEC.md`, and `ARCHITECTURE.md` are updated to reflect changes.
+
+If no milestone is defined, STOP and ask the user to define one.
+
+---
 
 ## The Loop
 
-### 1. Complete Remaining TODO Items
-Pick the next highest-priority item from `TODO.md` (or `ARCHITECTURE.md` if the task is architectural). Implement it with minimal, focused changes. Do not add speculative features.
+### Phase 1 — Load State
 
-### 2. Create Tests and Examples
-For every new capability:
-- Write tests next to components (`*.test.tsx`) that exercise the feature end-to-end where possible
-- Add unit tests for core logic where appropriate
-- Provide a minimal usage example if the feature is client-facing
+1. Read `TODO.md` to find the current milestone and next uncompleted item.
+2. Read `ARCHITECTURE.md` to understand module relationships.
+3. Read `SPEC.md` to verify the item is still in scope.
+4. If `progress.txt` exists, read it to resume from the last checkpoint.
 
-### 3. Ensure `bun test` Passes
-Run the full test suite. Fix any failures before proceeding. Warnings are acceptable but should be noted.
+### Phase 2 — Implement
 
-### 4. Loop Back to Step 1
-Return to `TODO.md` and pick the next item. Repeat until the backlog is clear.
+1. Pick the next highest-priority `[ ]` item in the current milestone.
+2. State the goal and success criterion explicitly before coding.
+3. Implement with minimal, focused changes. Do not add speculative features.
+4. If an item is too large (>300 lines of new code), decompose it into sub-items in `TODO.md` and tackle the first sub-item.
 
-### 5. Audit and Optimize
-After each batch of features, perform a quality pass:
-- **Maintainability**: Are functions small and well-named? Is the module structure logical?
-- **Leanness**: Remove dead code, unused imports, and speculative abstractions
-- **Wiring**: Ensure all new features are properly integrated into `main.tsx`, `package.json` scripts, and docs
-- **Small footprint**: Avoid unnecessary npm packages; prefer the standard library or lightweight dependencies
-- **Consistency**: Match existing code style and patterns
+### Phase 3 — Verify
 
-### 6. Competitive Intelligence
-Research similar open-source local LLM and pipeline design tools (Open WebUI, OpenLLM Studio, ModelSmith, HFDesk, Piper, etc.). Identify capabilities they have that this project lacks. Add the most valuable ones to the `TODO.md` brainstorming section. Prioritize features that provide clear competitive advantage.
+Run the verification stack in order. If any step fails, STOP the loop, fix the failure, and re-run from step 1 before proceeding.
 
-### 7. Update Documentation
-Keep all project docs aligned with the current implementation:
-- **`README.md`**: Quick start, feature list, architecture summary
-- **`TODO.md`**: Mark completed items, move them to Done, keep brainstorming current
-- **`SPEC.md`**: Scope and requirements for the site, technical stack, quality bar
-- **`ARCHITECTURE.md`**: Module relationships, data flow, deployment topology
-- **`AGENTS.md`**: This file — update if the loop itself evolves
+```bash
+# 1. Format check
+cargo fmt --check
+# If fails: cargo fmt && re-check
+
+# 2. Type / build check
+cargo check --all-targets --all-features
+# Fix all compiler errors.
+
+# 3. Clippy
+cargo clippy --all-targets --all-features -- -D warnings
+# If fails: fix or add justified #[allow(...)] with a code comment explaining why.
+
+# 4. Full test suite
+cargo test --all-targets --all-features
+# If fails: fix before proceeding. Do not weaken or skip tests.
+```
+
+### Phase 4 — Document & Commit State
+
+1. Mark the completed item `[x]` in `TODO.md`. Add a one-line **Status** if not already present.
+2. Update `ARCHITECTURE.md` if module relationships or data flow changed.
+3. Update `SPEC.md` if scope, requirements, or quality bar changed.
+4. Update `README.md` if user-facing features or CLI changed.
+5. Append a concise entry to `progress.txt`:
+   - Timestamp, item completed, lines changed, test result, any blockers.
+6. If 3 or more items have been completed since the last audit, trigger Phase 5.
+
+### Phase 5 — Audit (every 3+ items)
+
+1. **Maintainability**: Are functions small and well-named? Is the module structure logical?
+2. **Leanness**: Remove dead code, unused imports, and speculative abstractions.
+3. **Wiring**: Are all new features integrated into `main.rs`, CLI args, and library exports?
+4. **Small footprint**: Avoid unnecessary crates; prefer std or lightweight deps.
+5. **Consistency**: Match existing code style and patterns.
+6. **Performance**: Check for new `clone()`, `to_string()`, or per-check `Regex::new()` calls.
+7. Run the verification stack (Phase 3) again after cleanup.
+
+### Phase 6 — Competitive Intelligence (every milestone, or when TODO is empty)
+
+1. Research similar open-source tools (Ruff, Biome, oxlint, ESLint, clippy).
+2. Identify 3–5 capabilities they have that this project lacks.
+3. Add the most valuable ones to `TODO.md` brainstorming section.
+4. If the current milestone is complete, propose the next milestone to the user.
+
+### Phase 7 — Checkpoint or Continue
+
+- If the milestone has uncompleted items → go to Phase 1.
+- If the milestone is complete → STOP and report to the user:
+  - Summary of all items completed.
+  - Lines changed, test count, any clippy suppressions added.
+  - Suggested next milestone based on competitive intelligence.
+
+---
+
+## Failure Recovery
+
+| Situation | Action |
+|---|---|
+| `cargo test` fails after my change | Revert if obviously wrong; otherwise debug with `dbg!` or targeted unit tests. Fix before continuing. |
+| `cargo clippy` fails with new warning | Fix the warning. If false positive, add `#[allow(...)]` with a comment justifying it. |
+| TODO item is vague or too large | Break it into smaller items, update `TODO.md`, and do the first one. |
+| Unsure how to implement an item | Read `ARCHITECTURE.md`, then relevant source files. If still unclear, STOP and ask the user. Do not guess. |
+| External API / crate needed | Check `Cargo.toml` compatibility. If adding a dep, justify it in `progress.txt`. Prefer existing deps. |
+| 30+ minutes spent on one item | Checkpoint in `progress.txt`, then either: (a) ask user for guidance, or (b) if a clear simpler path exists, switch to it and note the pivot. |
+
+---
+
+## Project-Specific Rules
+
+- **Language**: Rust (edition 2024). Use `cargo` for everything.
+- **Tests**: Unit tests in `src/*.rs` under `#[cfg(test)]`, integration tests in `tests/*.rs`.
+- **No web stack**: This is a CLI/library/MCP project. Do not introduce JS/TS, npm, or browser concepts.
+- **Regex discipline**: All regex patterns must be compiled once (via `LazyLock` or struct field), never per-check.
+- **Cloning discipline**: Avoid `clone()` in hot paths. Use references, `Cow`, or `&str` where possible.
+- **Config wiring**: Every new CLI flag must have: (1) `Commands::Lint` field, (2) `Config` + `ConfigBuilder` field, (3) `merge_configs()` logic, (4) at least one parsing test.
+- **Output formats**: Every new format needs a `render_*` function and a test in `tests/integration_test.rs`.
+
+---
 
 ## Principles
 
-- **Simplicity over flexibility**: Solve the problem at hand, not every hypothetical future problem
-- **Surgical changes**: Touch only what you must; clean up only your own mess
-- **Goal-driven**: Every change should have a verifiable success criterion
-- **Test before ship**: No feature is complete until it has passing tests
-- **Docs are code**: Documentation drift is a bug
+- **Simplicity over flexibility**: Solve the problem at hand, not every hypothetical future problem.
+- **Surgical changes**: Touch only what you must; clean up only your own mess.
+- **Goal-driven**: Every change should have a verifiable success criterion.
+- **Test before ship**: No feature is complete until all relevant tests pass.
+- **Docs are code**: Documentation drift is a bug. Update docs in the same commit as the code.
+- **Autonomous but not reckless**: When uncertain, stop and ask. Never fake functionality or skip verification.
