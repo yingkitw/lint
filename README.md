@@ -107,6 +107,36 @@ lint lint . --select no-mixed-line-endings
 # Enable all built-in rules
 lint lint . --select-all
 
+# Enable all rules in a category
+lint lint . --select style
+lint lint . --select security
+lint lint . --select correctness,style
+
+# Ignore all rules in a category
+lint lint . --ignore security
+lint lint . --ignore style
+
+# Only lint files that have uncommitted changes (fast pre-commit hook)
+lint lint . --changed
+
+# Only lint staged files
+lint lint . --staged
+
+# Load a plugin rule pack
+lint lint . --plugin security
+
+# Load multiple plugins
+lint lint . --plugin security --plugin javascript
+
+# Don't respect .gitignore (lint generated files too)
+lint lint . --no-gitignore
+
+# Force exclude ignored files even when explicitly passed
+lint lint . --force-exclude
+
+# Disable source context in output
+lint lint . --no-show-source
+
 # List files that would be linted (without linting)
 lint lint . --print-files
 
@@ -124,6 +154,9 @@ lint lint . --output gitlab --output-file gl-code-quality-report.json
 
 # Concise one-line-per-violation output
 lint lint . --output concise
+
+# Show progress bar while linting (useful for large repos)
+lint lint . --progress
 
 # Show violations without failing the build
 lint lint . --exit-zero
@@ -151,6 +184,18 @@ lint lint . --fix --exit-non-zero-on-fix
 
 # Lint code from stdin (useful for editor integrations)
 echo 'let x = 5;   ' | lint lint --stdin --stdin-filename test.rs
+
+# Validate configuration file (catches unknown rules, plugins, etc.)
+lint lint . --validate-config
+
+# Set maximum allowed nesting depth (default: 4)
+lint lint . --max-nesting-depth 3
+
+# Set maximum function length in lines (default: 50)
+lint lint . --max-function-lines 30
+
+# Detect out-of-order imports (supports Rust, JS/TS, Python, C/C++, Go)
+lint lint . --rules sort-imports
 
 # List available rules
 lint list-rules
@@ -183,6 +228,24 @@ Share a base configuration across projects:
 
 Values in the local config override the base. Collections like `ignore_patterns`, `per_file_ignores`, and `severity_overrides` are merged.
 
+### Per-Directory Configuration
+
+Place a `.lint.toml` or `.lint.json` in any subdirectory to override settings for files in that tree:
+
+```toml
+# src/.lint.toml — stricter rules for source code
+max_line_length = 80
+enabled_rules = ["line-length", "trailing-whitespace", "no-todo", "no-tabs"]
+```
+
+```toml
+# tests/.lint.toml — relaxed rules for tests
+max_line_length = 120
+ignore_patterns = ["test_data"]
+```
+
+Per-directory configs are merged with the base config. Supported overrides: `max_line_length`, `enabled_rules`, `plugins`, `ignore_patterns`, `per_file_ignores`, `severity_overrides`.
+
 ### Unused Suppression Detection
 
 Enable the `unused-suppression` rule to detect suppression comments that don't actually suppress any violations (useful for cleanup after refactoring):
@@ -209,6 +272,63 @@ The server exposes the following tools:
 
 - `lint_files`: Lint specified files and return issues
 - `list_rules`: List all available linting rules
+
+### LSP Server
+
+Run the Language Server Protocol (LSP) server for real-time diagnostics in editors:
+
+```bash
+cargo run --bin lint-lsp -- --stdio
+```
+
+Or install and use with your editor:
+
+```bash
+cargo install --path .
+# Then configure your editor to run `lint-lsp --stdio`
+```
+
+Supported LSP methods:
+
+- `initialize` / `initialized`
+- `textDocument/didOpen` — lint opened files and publish diagnostics
+- `textDocument/didChange` — re-lint on change and publish diagnostics
+- `textDocument/didClose` — clear diagnostics
+- `shutdown` / `exit`
+
+### Pre-commit Hook
+
+Use `lint` with [pre-commit](https://pre-commit.com/):
+
+```yaml
+repos:
+  - repo: https://github.com/yingkitw/lint
+    rev: v0.1.3
+    hooks:
+      - id: lint
+```
+
+To lint only changed files (faster for large repos):
+
+```yaml
+repos:
+  - repo: https://github.com/yingkitw/lint
+    rev: v0.1.3
+    hooks:
+      - id: lint
+        args: ['--changed']
+```
+
+To lint only staged files:
+
+```yaml
+repos:
+  - repo: https://github.com/yingkitw/lint
+    rev: v0.1.3
+    hooks:
+      - id: lint
+        args: ['--staged']
+```
 
 ### Library
 

@@ -293,7 +293,7 @@
 
 ## Done
 
-- [x] Comprehensive unit and integration test coverage (137 lib + 86 bin + 18 advanced + 10 basic = 251 tests)
+- [x] Comprehensive unit and integration test coverage (164 lib + 110 bin + 18 advanced + 10 basic = 302 tests)
 - [x] Source context in text output (offending line + caret underline)
 - [x] `--statistics` CLI flag (per-rule violation counts)
 - [x] `--show-fixes` CLI flag (list files modified by --fix)
@@ -461,10 +461,11 @@
   - Useful when shell globbing accidentally matches ignored directories
   - **Status**: Added `force_exclude: bool` to `Config`, `ConfigBuilder`, and `Commands::Lint`. In `linter.rs`, `lint_path()` checks `is_ignored()` for explicitly passed files when `force_exclude` is true. CLI parsing test and behavior tests added.
 
-- [ ] **Git-aware linting (`--changed`, `--staged`)**
+- [x] **Git-aware linting (`--changed`, `--staged`)**
   - Biome supports `--changed` and `--staged` to only lint files modified in git
   - **Goal**: `lint lint . --changed` only lints files with uncommitted changes; `--staged` only lints staged files
   - Dramatically speeds up pre-commit hooks and CI on large monorepos
+  - **Status**: See round 14 for implementation details.
 
 - [x] **`--ext` CLI flag**
   - ESLint uses `--ext .js,.jsx,.ts` to filter which file extensions to lint
@@ -478,10 +479,11 @@
   - Essential for troubleshooting why a file is or isn't being linted
   - **Status**: Added `verbose: bool` to `Commands::Lint` and `run_lint_and_print()`. When true, prints file count, diagnostic count, cache status, and fix mode status before rendering results. CLI parsing test added.
 
-- [ ] **Plugin system for custom rules**
+- [x] **Plugin system for custom rules**
   - Oxlint supports `--import-plugin`, `--jsdoc-plugin`, etc. for extending rule sets
   - **Goal**: Load additional rule packs as plugins (e.g., `--plugin security`, `--plugin react`)
   - Would enable ecosystem-specific rules without bloating the core binary
+  - **Status**: See round 14 for implementation details.
 
 ## Brainstorming (from competitive intelligence round 13)
 
@@ -531,17 +533,17 @@
   - Useful when you want to lint generated files that are gitignored
   - **Status**: Added `no_gitignore: bool` to `Config`, `ConfigBuilder`, and `Commands::Lint`. `WalkBuilder::git_ignore()` toggled in `linter.rs`. `GitignoreBuilder` skipped when `no_gitignore` is true. CLI parsing and behavior tests added.
 
-- [ ] **Git-aware linting (`--changed`, `--staged`)**
+- [x] **Git-aware linting (`--changed`, `--staged`)**
   - Biome supports `--changed` and `--staged` to only lint files modified in git
   - **Goal**: `lint lint . --changed` only lints files with uncommitted changes; `--staged` only lints staged files
   - Dramatically speeds up pre-commit hooks and CI on large monorepos
-  - Requires adding `git2` or shelling out to `git status`
+  - **Status**: Added `--changed` and `--staged` CLI flags. `git_changed_files()` shells out to `git diff --name-only HEAD` and `git diff --cached --name-only`. Paths are intersected with git file list (respecting directory arguments). CLI parsing tests and behavior tests with real git repos added.
 
-- [ ] **Plugin system for custom rules**
+- [x] **Plugin system for custom rules**
   - Oxlint supports `--import-plugin`, `--jsdoc-plugin`, etc. for extending rule sets
   - **Goal**: Load additional rule packs as plugins (e.g., `--plugin security`, `--plugin react`)
   - Would enable ecosystem-specific rules without bloating the core binary
-  - Complex: requires dynamic loading or conditional compilation of rule modules
+  - **Status**: Added `--plugin` CLI flag (repeatable, comma-delimited). Built-in plugins: `security` (hardcoded-secret, unsafe-eval, sql-injection-risk), `javascript`, `python`, `rust`, `html`, `css`. `plugin_rules()` maps plugin names to rule names. Plugin rules are added to the enabled set. `LanguageRuleSet::new_filtered()` only runs language rules in the enabled set when plugins are active (backward compatible: no plugins = all language rules run). New security generic rules added. CLI parsing and behavior tests added.
 
 ## Optimization round (performance pass)
 
@@ -570,3 +572,157 @@
 - [x] **Clean clippy warnings**
   - `large_enum_variant` suppressed on `Commands` enum (CLI-only, constructed once)
   - `collapsible_if` suppressed where let-chains are needed
+
+## Brainstorming (from competitive intelligence round 14)
+
+## Milestone: Import Sorting (COMPLETE)
+
+- [x] `sort-imports` generic rule — detect consecutive import/use/require lines that are not alphabetically sorted
+- [x] Support Rust (`use `), JS/TS (`import ` / `require(`), Python (`import ` / `from `), C/C++ (`#include`), Go (`import `)
+- [x] `sort-imports` is enabled via `--rules sort-imports` or `enabled_rules` config
+- [x] Unit tests for each language pattern (Rust sorted/unsorted, Python unsorted, JS from unsorted, single line noop)
+- [x] README documentation
+
+## Milestone: Complexity Rules (COMPLETE)
+
+- [x] `max-nesting-depth` generic rule — count `{`/`}` depth, report lines exceeding threshold
+- [x] `max-function-lines` generic rule — detect function boundaries, report functions exceeding threshold
+- [x] `--max-nesting-depth` and `--max-function-lines` CLI flags
+- [x] Config fields `max_nesting_depth` and `max_function_lines`
+- [x] Unit tests and integration tests (4 rule tests + 2 CLI parsing tests)
+- [x] README documentation
+
+- [x] **Per-directory configuration overrides**
+  - Ruff and Biome support config files in subdirectories that override parent settings
+  - **Goal**: A `src/.lint.toml` can override `max_line_length` or `ignore_patterns` for that subtree only
+  - **Status**: Added `DirConfig` struct in `linter.rs` to hold per-directory config + rule sets. `Linter::new_with_per_dir_configs()` builds base + per-directory configs. `discover_per_dir_configs()` in `main.rs` walks paths looking for `.lint.toml`/`.lint.json`, loads, merges with base, and passes to Linter. `lint_file()` uses `effective_config()` and `effective_rule_sets()` to look up nearest directory config. Supports overrides for `max_line_length`, `enabled_rules`, `plugins`, `ignore_patterns`, `per_file_ignores`, `severity_overrides`. Two unit tests added.
+
+- [x] **Rule category enable/disable (`--select`, `--ignore` by category)**
+  - Ruff supports `--select E,W` to enable by category code; Biome uses `--linter.enabled-rules` groups
+  - **Goal**: `lint lint . --select style,correctness` enables only those categories; `--ignore security` disables security rules
+  - **Status**: Added `category_rules()` and `is_category()` to `rules.rs`. `expand_rule_names()` in `main.rs` expands category names to their constituent rule names before rule selection. `--select style` adds all style rules; `--ignore security` removes all security rules. Works alongside existing per-rule `--select` and `--ignore`. Unit tests for helpers and behavior tests for expansion added.
+
+- [x] **LSP / IDE integration (`lint-lsp` binary)**
+  - Ruff provides `ruff-lsp` for real-time diagnostics in VS Code, Neovim, etc.
+  - **Goal**: A `lint-lsp` binary that implements the Language Server Protocol, streaming diagnostics as files change
+  - **Status**: Added `lint-lsp` binary using raw JSON-RPC 2.0 over stdin/stdout (no new dependencies). `LspServer::run()` reads Content-Length prefixed messages, dispatches to method handlers. Supports: `initialize`, `initialized`, `textDocument/didOpen`, `textDocument/didChange`, `textDocument/didClose`, `shutdown`, `exit`. On open/change, lints content via `Linter::lint_content()` and sends `textDocument/publishDiagnostics`. Refactored `linter.rs` to extract `lint_content()` for in-memory linting. README updated with setup instructions.
+
+- [x] **Rule descriptions for all rules**
+  - `explain` and `list-rules` commands show descriptions for rules
+  - **Status**: Added `description()` implementations to all 11 generic rules and all 18 language-specific rules. Refactored `explain_rule()` and `list_rules()` in `main.rs` to use the actual `Linter` rule sets instead of hardcoded lists, so new rules automatically appear. Added `rule_set()` and `language_rule_set()` getters to `Linter`.
+
+- [x] **Pre-commit hook support**
+  - Ruff and Biome publish official `.pre-commit-hooks.yaml` files
+  - **Goal**: A `pre-commit` hook config that runs `lint lint --changed --staged` on commit
+  - **Status**: Added `.pre-commit-hooks.yaml` with `id: lint`, `entry: lint lint`, `types_or: [text]`, `pass_filenames: true`. README updated with basic usage, `--changed`, and `--staged` examples.
+
+- [x] **Progress indicator for large runs**
+  - Biome shows a progress bar when scanning thousands of files
+  - **Goal**: `lint lint . --progress` shows a progress bar with file count and elapsed time
+  - **Status**: Added `--progress` CLI flag. Uses `indicatif` crate. Before linting, counts files via `Linter::list_files()` and shows a spinner-style progress bar with `{spinner} [{elapsed}] Linting files {pos}/{len}`. Bar finishes with "Linting complete" after results return. CLI parsing test added.
+
+- [x] **Config validation mode (`--show-config` with errors)**
+  - Ruff validates config and prints helpful error messages for unknown rules or invalid severity values
+  - **Goal**: `lint lint --validate-config` exits non-zero if config is invalid, printing specific errors
+  - **Status**: Added `--validate-config` CLI flag. `validate_config_errors()` checks: (1) all rules in `enabled_rules` are known, (2) all keys in `severity_overrides` are known rules, (3) all plugins are known. Prints each error to stderr and exits 1 if any found; prints "Config is valid." and exits 0 otherwise. `known_rules()` and `known_plugins()` added to `rules.rs`. 4 unit tests and 1 CLI parsing test added.
+
+- [x] **Import sorting / organization**
+  - Ruff's `isort` equivalent and Biome's formatter both organize imports
+  - **Goal**: A new generic rule `sort-imports` that reorders `use`/`import`/`require` statements alphabetically/grouped
+  - **Status**: Added `SortImportsRule` that detects consecutive import blocks across Rust (`use `), JS/TS (`import ` / `require(`), Python (`import ` / `from `), C/C++ (`#include`). Extracts sort keys per language and reports out-of-order lines. 5 unit tests. Enabled via `--rules sort-imports`.
+
+- [x] **Complexity rules (nesting depth, function length)**
+  - ESLint has `max-nested-callbacks`, `max-lines-per-function`; Ruff has `C901` (McCabe complexity)
+  - **Goal**: Generic rules `max-nesting-depth`, `max-function-lines`, `max-cyclomatic-complexity`
+  - **Status**: Added `MaxNestingDepthRule` (counts `{`/`}` depth, default threshold 4) and `MaxFunctionLinesRule` (detects function boundaries via `fn`/`def`/`func`/`function`/`{`+`(` patterns, default threshold 50 lines). CLI flags `--max-nesting-depth` and `--max-function-lines`. Config fields `max_nesting_depth` and `max_function_lines`. 6 tests.
+
+## Brainstorming / Competitive Intelligence
+
+- [x] **`--select ALL` to enable all rules**
+  - Ruff supports `--select ALL` to enable every rule; our `--select` only accepts categories or individual rule names
+  - **Goal**: `--select ALL` expands to every known generic and language rule
+  - **Status**: `expand_rule_names()` now handles `ALL` (case-insensitive) by returning all generic and language rules via `known_rules()`. `--select-all` flag refactored to use `expand_rule_names(vec!["ALL"])` instead of a stale hardcoded list, so it automatically includes new rules. `LanguageRuleSet::known_rules()` added. 2 unit tests: CLI parsing and expansion verification.
+
+- [x] **Rule codes / IDs (E501, W001 style)**
+  - Ruff, Clippy, ESLint all use short letter-number codes for rules (e.g., E501 = line too long)
+  - Makes referencing rules in suppressions, configs, and conversations much easier
+  - **Goal**: Assign a unique `code: &str` to every rule; display in output; support `# lint: ignore=E501`
+  - **Status**: Added `code()` to `Rule` and `LanguageRule` traits with a default implementation using `code_from_name()`. Created `code_from_name()` and `name_from_code()` lookup functions. Assigned codes: W### for style, E### for correctness/error, S### for security, L### for language-specific. Updated `expand_rule_names()` to accept codes (e.g., `--select W001` resolves to `line-length`). Updated `validate_config_errors()` to accept codes. Updated suppression system (`is_line_suppressed`, block suppressions, file-level ignores, unused suppression detection) to match both rule names and codes. Updated text output to display `[code]` before severity. Updated `list-rules` and `explain` to show codes. 8 tests: code mapping, round-trip, unknown fallback, rule method, expansion, config validation, and suppression by code.
+
+- [x] **Auto-fix for `sort-imports`**
+  - Currently only trailing-whitespace, no-tabs, final-newline, no-consecutive-empty-lines, and no-mixed-line-endings have fixes
+  - **Goal**: `sort-imports` fix reorders the import block alphabetically
+  - **Status**: `SortImportsRule::check()` now attaches a `Fix { line: 0, replacement: sorted_content }` to the first violation message. `sort_all_imports()` finds every consecutive import block, sorts it alphabetically using the existing `extract_sort_key()` per-language logic, and preserves all non-import lines. 2 unit tests verify block reordering and non-import line preservation.
+
+- [x] **`has_fix()` on Rule and LanguageRule traits**
+  - `list-rules` hardcoded a broken heuristic (`rule.name() == "line-length"`) for showing auto-fix availability
+  - **Goal**: Rules self-report whether they support auto-fix; `list-rules` and `explain` show accurate info
+  - **Status**: Added `fn has_fix(&self) -> bool` to both `Rule` and `LanguageRule` traits with default `false`. Overridden to `true` for: `TrailingWhitespaceRule`, `NoTabsRule`, `FinalNewlineRule`, `NoConsecutiveEmptyLinesRule`, `NoMixedLineEndingsRule`, `SortImportsRule`. Refactored `list_rules()` to use `rule.has_fix()`. Refactored `explain_rule()` to DRY the lookup and print `Auto-fix: yes/no`. 2 tests verify fixable and non-fixable rule sets.
+
+- [x] **Multiple ignore patterns per suppression**
+  - Currently `// lint: ignore=W001` only accepts a single rule; some lines violate multiple rules
+  - **Goal**: Support comma-separated lists like `// lint: ignore=W001,W002`
+  - **Status**: Updated all suppression parsers (`is_line_suppressed`, `parse_block_suppressions`, `parse_file_level_ignore`, `parse_suppression_directives`) to split by comma and check each rule. `lint: ignore=W001,W002`, `lint: disable=W001,W002`, `lint: enable=W001,W002`, and `lint: ignore-file=W001,W002` all work. Unused suppression detection correctly evaluates each rule in the list independently. 1 test (`test_multiple_inline_ignore_patterns`).
+
+- [ ] **Per-rule default severity**
+  - All rules currently default to Warning; security rules like `hardcoded-secret` should arguably be Error by default
+  - **Goal**: Rules self-report a default severity; `severity_overrides` can upgrade or downgrade
+
+- [ ] **Rule documentation URL in `explain` output**
+  - Ruff and ESLint provide URLs to rule docs; users often want to read more
+  - **Goal**: Add `url()` method to `Rule`/`LanguageRule`; `explain` prints it
+
+- [ ] **Lint timing / `--profile` flag**
+  - Large codebases want to know which rules are slow
+  - **Goal**: `--profile` prints per-rule and per-file timing after linting
+
+- [x] **SARIF output format**
+  - GitHub Advanced Security, Azure DevOps, and many CI systems consume SARIF for code scanning dashboards
+  - **Goal**: `lint lint --format sarif` produces SARIF 2.1.0 JSON
+  - **Status**: Already implemented. `OutputFormat::Sarif` variant exists. `render_sarif()` produces SARIF 2.1.0 JSON with runs, rules, and results arrays.
+
+- [x] **Parallel linting with `rayon`**
+  - Ruff and Biome both lint files in parallel; our linter processes sequentially
+  - **Goal**: Use `rayon::par_iter` over file list for multi-core speedup
+  - **Status**: Already implemented. `Linter::run()` uses `self.config.paths.par_iter().map(|path| self.lint_path(path)).collect()` via `rayon::prelude::*`. `rayon` dependency already in `Cargo.toml`.
+
+- [x] **`--statistics` flag**
+  - ESLint has `--stats` to show violation counts by rule; Ruff shows per-rule counts in summary
+  - **Goal**: `lint lint --statistics` prints a table of rule -> count -> severity
+  - **Status**: Already implemented. `RunOptions` includes `statistics: bool`. After linting, counts violations per rule into a `HashMap<&str, usize>`, sorts by count descending, and prints `Statistics:` table. CLI parsing test exists.
+
+- [x] **`--baseline` mode (only new violations)**
+  - Biome supports `--changed` for staged files; some teams want "only show violations I introduced"
+  - **Goal**: `lint lint --baseline baseline.json` filters out known violations from a JSON baseline file
+  - **Status**: Already implemented. `--baseline PATH` CLI flag loads a JSON array of `{file, line, rule}` entries and removes matching violations from results before output. `BaselineEntry` struct, `load_baseline()`, `filter_baseline()` helpers. CLI parsing and behavior tests exist.
+
+- [x] **TOML config support**
+  - Ruff reads `pyproject.toml`; Biome reads `biome.json` or `biome.toml`
+  - **Goal**: Support `.lint.toml` as an alternative to `.lint.json`
+  - **Status**: Already implemented. `load_config_file()` detects `.toml` extension and uses `toml::from_str()` instead of `serde_json::from_str()`. `find_config_file()` searches for both `.lint.json` and `.lint.toml`. `toml` crate is in `Cargo.toml` dependencies.
+
+- [x] **`add_noqa` should use rule codes**
+  - Currently inserts `// lint: ignore=trailing-whitespace` which is verbose
+  - **Goal**: Use short codes like `// lint: ignore=W002` when a known code exists
+  - **Status**: `add_noqa` logic now looks up `code_from_name(&msg.rule)`. If the code differs from the rule name, it inserts the shorter code (e.g., `W002` instead of `trailing-whitespace`). Falls back to the rule name for custom/unknown rules.
+
+- [x] **Context lines in text output**
+  - Ruff and Clippy show 1-2 lines of surrounding context around each violation
+  - **Goal**: `--show-source` displays the violating line plus one line before and after
+  - **Status**: Enhanced `show_source` block in text output renderer. Now prints the previous line (dimmed), the violating line with caret, and the next line (dimmed) when `--show-source` is enabled.
+
+- [x] **Cache invalidation on config / rule changes**
+  - Current cache uses file mtime/size or content hash, but does NOT consider rule or config changes
+  - If you lint with rules A+B, then add rule C to config, the cache may return stale results
+  - **Goal**: Include a hash of the effective lint configuration in the cache key so that any rule/config change invalidates cached results
+  - **Status**: Added `config_hash: Option<String>` to `CacheEntry`. `lint_file()` now computes a config hash from `enabled_rules` (sorted), `max_line_length`, `max_nesting_depth`, `max_function_lines`, `severity_overrides` (sorted), and `ignore_suppressions`. Both `get()` and `get_by_hash()` now accept an optional `config_hash` parameter and validate it against stored entries. `insert()` and `insert_with_hash()` store the config hash. Cache tests updated. 1 new test (`test_cache_miss_config_hash_changed`).
+
+- [x] **Show rule codes in SARIF / GitHub / JUnit / GitLab output**
+  - Machine-readable formats currently only emit rule names; codes make integration with dashboards easier
+  - **Goal**: Include `code` field in SARIF rules and GitHub/JUnit/GitLab annotations
+  - **Status**: Updated all machine-readable renderers to use short codes. SARIF `ruleId` and rules `id` now use codes (e.g., `W001`) with `shortDescription` containing both code and name. GitHub `title` now shows `W001 (line-length)`. JUnit `type` and body bracket now use codes. GitLab `check_name` now uses codes.
+
+- [x] **`/* block comment */` suppression support**
+  - Currently only `// line comments` are parsed for `lint: ignore/disable/enable`
+  - **Goal**: Support `/* lint: ignore=W001 */` and `/* lint: disable=W002 */ ... /* lint: enable=W002 */`
+  - **Status**: Updated all suppression parsers (`is_line_suppressed`, `parse_block_suppressions`, `parse_file_level_ignore`, `parse_suppression_directives`) to strip trailing `*/` after extracting the directive, enabling single-line block comment suppressions. 4 tests: inline, block, file-level, and block-comment-block suppression.

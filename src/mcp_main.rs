@@ -1,5 +1,5 @@
-use lint::McpServer;
 use clap::Parser;
+use lint::McpServer;
 
 #[derive(Parser)]
 #[command(name = "lint-mcp")]

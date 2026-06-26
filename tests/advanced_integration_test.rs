@@ -195,7 +195,12 @@ fn test_lint_csharp_file() -> anyhow::Result<()> {
 
     let results = lint::lint_files(&config).unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].messages.iter().any(|m| m.rule == "no-csharp-console"));
+    assert!(
+        results[0]
+            .messages
+            .iter()
+            .any(|m| m.rule == "no-csharp-console")
+    );
 
     Ok(())
 }
@@ -213,8 +218,12 @@ fn test_lint_html_file() -> anyhow::Result<()> {
 
     let results = lint::lint_files(&config).unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].messages.iter().any(|m| m.rule == "html-img-alt"
-        || m.rule == "html-no-inline-style"));
+    assert!(
+        results[0]
+            .messages
+            .iter()
+            .any(|m| m.rule == "html-img-alt" || m.rule == "html-no-inline-style")
+    );
 
     Ok(())
 }
@@ -252,7 +261,12 @@ fn test_lint_sql_file() -> anyhow::Result<()> {
 
     let results = lint::lint_files(&config).unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].messages.iter().any(|m| m.rule == "sql-no-select-star"));
+    assert!(
+        results[0]
+            .messages
+            .iter()
+            .any(|m| m.rule == "sql-no-select-star")
+    );
 
     Ok(())
 }
@@ -270,7 +284,12 @@ fn test_lint_shell_file() -> anyhow::Result<()> {
 
     let results = lint::lint_files(&config).unwrap();
     assert_eq!(results.len(), 1);
-    assert!(results[0].messages.iter().any(|m| m.rule == "shell-echo-quote"));
+    assert!(
+        results[0]
+            .messages
+            .iter()
+            .any(|m| m.rule == "shell-echo-quote")
+    );
 
     Ok(())
 }
@@ -299,7 +318,11 @@ fn test_lint_respects_ignore_patterns() -> anyhow::Result<()> {
 
     let paths: Vec<_> = results.iter().map(|r| r.file_path.clone()).collect();
     assert!(paths.iter().any(|p| p.ends_with("src/main.rs")));
-    assert!(!paths.iter().any(|p| p.to_string_lossy().contains("node_modules")));
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p.to_string_lossy().contains("node_modules"))
+    );
 
     Ok(())
 }

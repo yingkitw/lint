@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use lint::{Config, ConfigBuilder, OutputFormat};
 use lint::config::CacheStrategy;
+use lint::{Config, ConfigBuilder, OutputFormat};
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -160,6 +160,27 @@ enum Commands {
 
         #[arg(long)]
         no_gitignore: bool,
+
+        #[arg(long)]
+        changed: bool,
+
+        #[arg(long)]
+        staged: bool,
+
+        #[arg(long, value_name = "PLUGIN", use_value_delimiter = true)]
+        plugin: Option<Vec<String>>,
+
+        #[arg(long)]
+        progress: bool,
+
+        #[arg(long)]
+        validate_config: bool,
+
+        #[arg(long, value_name = "DEPTH")]
+        max_nesting_depth: Option<usize>,
+
+        #[arg(long, value_name = "LINES")]
+        max_function_lines: Option<usize>,
     },
     ListRules,
     Version,
@@ -190,6 +211,8 @@ struct RunOptions<'a> {
     baseline: Option<&'a PathBuf>,
     fixable: Option<&'a [String]>,
     unfixable: Option<&'a [String]>,
+    progress: bool,
+    per_dir_configs: std::collections::HashMap<PathBuf, lint::Config>,
 }
 
 impl<'a> RunOptions<'a> {
@@ -203,11 +226,31 @@ fn run_lint_and_print(
     cache: Option<Arc<Mutex<lint::cache::Cache>>>,
     opts: RunOptions,
 ) -> anyhow::Result<i32> {
-    let mut results = if let Some(ref c) = cache {
-        lint::lint_files_with_cache(config, Some(c.clone()))?
+    let progress_bar = if opts.progress {
+        let linter =
+            lint::Linter::new_with_per_dir_configs(config, None, opts.per_dir_configs.clone());
+        let files = linter.list_files();
+        let pb = indicatif::ProgressBar::new(files.len() as u64);
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {msg} {pos}/{len} ({per_sec})",
+            )
+            .unwrap()
+            .progress_chars("##-"),
+        );
+        pb.set_message("Linting files".to_string());
+        Some(pb)
     } else {
-        lint::lint_files(config)?
+        None
     };
+
+    let linter =
+        lint::Linter::new_with_per_dir_configs(config, cache.clone(), opts.per_dir_configs.clone());
+    let mut results = linter.run()?;
+
+    if let Some(pb) = progress_bar {
+        pb.finish_with_message("Linting complete".to_string());
+    }
 
     let effective_fix = opts.effective_fix();
 
@@ -216,9 +259,10 @@ fn run_lint_and_print(
         for result in &mut results {
             for msg in &mut result.messages {
                 if let Some(ref fix) = msg.fix
-                    && !fix.is_safe {
-                        msg.fix = None;
-                    }
+                    && !fix.is_safe
+                {
+                    msg.fix = None;
+                }
             }
         }
     }
@@ -249,7 +293,11 @@ fn run_lint_and_print(
     if effective_fix || opts.diff || opts.check {
         let mut fixed_count = 0;
         for result in &mut results {
-            let original = if opts.diff { result.file_content.clone() } else { String::new() };
+            let original = if opts.diff {
+                result.file_content.clone()
+            } else {
+                String::new()
+            };
             if result.apply_fixes() {
                 fixed_count += 1;
                 fixed_files.push(result.file_path.display().to_string());
@@ -289,12 +337,15 @@ fn run_lint_and_print(
             if result.messages.is_empty() {
                 continue;
             }
-            let mut lines: Vec<String> = result.file_content.lines().map(|s| s.to_string()).collect();
+            let mut lines: Vec<String> =
+                result.file_content.lines().map(|s| s.to_string()).collect();
             let mut modified = false;
             for msg in &result.messages {
                 let line_idx = msg.line.saturating_sub(1);
                 if let Some(line) = lines.get_mut(line_idx) {
-                    let directive = format!(" // lint: ignore={}", msg.rule);
+                    let code = lint::rules::code_from_name(&msg.rule);
+                    let rule_ref = if code != msg.rule { code } else { &msg.rule };
+                    let directive = format!(" // lint: ignore={}", rule_ref);
                     if !line.contains(&directive) {
                         line.push_str(&directive);
                         modified = true;
@@ -318,7 +369,10 @@ fn run_lint_and_print(
     if opts.verbose && !opts.quiet {
         let total_files = results.len();
         let total_messages: usize = results.iter().map(|r| r.messages.len()).sum();
-        println!("Linting {} file(s), found {} diagnostic(s)", total_files, total_messages);
+        println!(
+            "Linting {} file(s), found {} diagnostic(s)",
+            total_files, total_messages
+        );
         if cache.is_some() {
             println!("Cache: enabled");
         } else {
@@ -342,7 +396,8 @@ fn run_lint_and_print(
     if !opts.fix_only {
         if let Some(path) = opts.output_file {
             colored::control::set_override(false);
-            let output = render_results(&results, opts.output_format, opts.quiet, config.show_source);
+            let output =
+                render_results(&results, opts.output_format, opts.quiet, config.show_source);
             colored::control::unset_override();
             std::fs::write(path, output)?;
         } else {
@@ -351,7 +406,10 @@ fn run_lint_and_print(
     }
 
     if hidden_diagnostics > 0 && !opts.quiet && !opts.fix_only {
-        println!("... {} additional diagnostics hidden ...", hidden_diagnostics);
+        println!(
+            "... {} additional diagnostics hidden ...",
+            hidden_diagnostics
+        );
     }
 
     if opts.show_fixes && !fixed_files.is_empty() && !opts.quiet && !opts.fix_only {
@@ -381,14 +439,24 @@ fn run_lint_and_print(
     let has_errors = results.iter().any(|r| r.has_errors());
     let warning_count: usize = results
         .iter()
-        .map(|r| r.messages.iter().filter(|m| m.severity == lint::Severity::Warning).count())
+        .map(|r| {
+            r.messages
+                .iter()
+                .filter(|m| m.severity == lint::Severity::Warning)
+                .count()
+        })
         .sum();
     let max_warnings_exceeded = opts.max_warnings.is_some_and(|max| warning_count > max);
     let any_fixes_applied = !fixed_files.is_empty();
 
     Ok(if opts.fix_only || opts.exit_zero {
         0
-    } else if has_errors || max_warnings_exceeded || (opts.deny_warnings && warning_count > 0) || (opts.exit_non_zero_on_fix && any_fixes_applied) || (opts.check && any_fixes_applied) {
+    } else if has_errors
+        || max_warnings_exceeded
+        || (opts.deny_warnings && warning_count > 0)
+        || (opts.exit_non_zero_on_fix && any_fixes_applied)
+        || (opts.check && any_fixes_applied)
+    {
         1
     } else {
         0
@@ -489,7 +557,11 @@ fn merge_configs(base: Config, local: Config) -> Config {
     }
 
     Config {
-        paths: if local.paths.is_empty() { base.paths } else { local.paths },
+        paths: if local.paths.is_empty() {
+            base.paths
+        } else {
+            local.paths
+        },
         ignore_patterns,
         max_line_length: local.max_line_length.or(base.max_line_length),
         rule_set: lint::config::RuleSetConfig {
@@ -498,7 +570,10 @@ fn merge_configs(base: Config, local: Config) -> Config {
             } else {
                 local.rule_set.enabled_rules
             },
-            custom_rules_path: local.rule_set.custom_rules_path.or(base.rule_set.custom_rules_path),
+            custom_rules_path: local
+                .rule_set
+                .custom_rules_path
+                .or(base.rule_set.custom_rules_path),
         },
         output_format: local.output_format,
         per_file_ignores,
@@ -516,7 +591,74 @@ fn merge_configs(base: Config, local: Config) -> Config {
         preview: local.preview || base.preview,
         show_source: local.show_source && base.show_source,
         no_gitignore: local.no_gitignore || base.no_gitignore,
+        plugins: {
+            let mut merged = base.plugins;
+            for p in local.plugins {
+                if !merged.contains(&p) {
+                    merged.push(p);
+                }
+            }
+            merged
+        },
+        max_nesting_depth: local.max_nesting_depth.or(base.max_nesting_depth),
+        max_function_lines: local.max_function_lines.or(base.max_function_lines),
     }
+}
+
+/// Discovers `.lint.toml` / `.lint.json` files in subdirectories of the given
+/// paths and returns a map from directory path to the merged config.
+fn discover_per_dir_configs(
+    paths: &[PathBuf],
+    base_config: &lint::Config,
+) -> std::collections::HashMap<PathBuf, lint::Config> {
+    let mut per_dir = std::collections::HashMap::new();
+    for path in paths {
+        let dir = if path.is_dir() {
+            path.clone()
+        } else if let Some(parent) = path.parent() {
+            parent.to_path_buf()
+        } else {
+            continue;
+        };
+        discover_in_dir(&dir, base_config, &mut per_dir);
+    }
+    per_dir
+}
+
+fn discover_in_dir(
+    dir: &std::path::Path,
+    base_config: &lint::Config,
+    per_dir: &mut std::collections::HashMap<PathBuf, lint::Config>,
+) {
+    let walker = ignore::WalkBuilder::new(dir)
+        .git_ignore(!base_config.no_gitignore)
+        .build();
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(cfg) = load_dir_config(path) {
+            let merged = merge_configs(base_config.clone(), cfg);
+            per_dir.insert(path.to_path_buf(), merged);
+        }
+    }
+}
+
+fn load_dir_config(dir: &std::path::Path) -> Option<lint::Config> {
+    let json = dir.join(".lint.json");
+    if json.is_file()
+        && let Ok(config) = load_config_file(&json)
+    {
+        return Some(config);
+    }
+    let toml = dir.join(".lint.toml");
+    if toml.is_file()
+        && let Ok(config) = load_config_file(&toml)
+    {
+        return Some(config);
+    }
+    None
 }
 
 fn expand_globs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -592,6 +734,13 @@ fn main() -> anyhow::Result<()> {
             preview,
             no_show_source,
             no_gitignore,
+            changed,
+            staged,
+            plugin,
+            progress,
+            validate_config,
+            max_nesting_depth,
+            max_function_lines,
         } => {
             let _ = no_error_on_unmatched_pattern;
             match color.as_deref() {
@@ -618,9 +767,11 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|f| std::path::Path::new(f).extension())
                     .and_then(|e| e.to_str())
                     .unwrap_or("rs");
-                let temp_path = std::env::temp_dir().join(format!("lint_stdin_{}.{}"
-                    , std::process::id()
-                    , suffix));
+                let temp_path = std::env::temp_dir().join(format!(
+                    "lint_stdin_{}.{}",
+                    std::process::id(),
+                    suffix
+                ));
                 std::fs::write(&temp_path, content)?;
                 Some(temp_path)
             } else {
@@ -634,6 +785,35 @@ fn main() -> anyhow::Result<()> {
                 config.paths = vec![PathBuf::from(".")];
             } else {
                 config.paths = expand_globs(paths);
+            }
+
+            if changed || staged {
+                let git_files = git_changed_files(changed, staged)?;
+                if git_files.is_empty() {
+                    config.paths.clear();
+                } else {
+                    let requested: std::collections::HashSet<PathBuf> =
+                        config.paths.iter().cloned().collect();
+                    let mut filtered = Vec::new();
+                    for gf in &git_files {
+                        let gf_canon = std::path::Path::new(gf).canonicalize().ok();
+                        for req in &requested {
+                            if req == gf {
+                                filtered.push(gf.clone());
+                                break;
+                            }
+                            if req.is_dir()
+                                && let Some(ref c) = gf_canon
+                                && let Ok(req_canon) = req.canonicalize()
+                                && c.starts_with(&req_canon)
+                            {
+                                filtered.push(gf.clone());
+                                break;
+                            }
+                        }
+                    }
+                    config.paths = filtered;
+                }
             }
 
             if let Some(exclude_patterns) = exclude {
@@ -657,41 +837,51 @@ fn main() -> anyhow::Result<()> {
             config.preview = preview;
             config.show_source = !no_show_source;
             config.no_gitignore = no_gitignore;
+            config.plugins = plugin.unwrap_or_default();
+            config.max_nesting_depth = max_nesting_depth;
+            config.max_function_lines = max_function_lines;
 
             if let Some(length) = max_line_length {
                 config.max_line_length = Some(length);
             }
 
             if let Some(rules) = rules {
-                config.rule_set.enabled_rules = rules;
+                config.rule_set.enabled_rules = expand_rule_names(rules);
             } else {
                 if let Some(select) = select {
-                    for rule in select {
+                    for rule in expand_rule_names(select) {
                         if !config.rule_set.enabled_rules.contains(&rule) {
                             config.rule_set.enabled_rules.push(rule);
                         }
                     }
                 }
                 if let Some(ignore) = ignore {
-                    config.rule_set.enabled_rules.retain(|r| !ignore.contains(r));
+                    let expanded_ignore = expand_rule_names(ignore);
+                    config
+                        .rule_set
+                        .enabled_rules
+                        .retain(|r| !expanded_ignore.contains(r));
                 }
             }
 
             if select_all {
-                let all_rules = vec![
-                    "line-length".to_string(),
-                    "trailing-whitespace".to_string(),
-                    "no-todo".to_string(),
-                    "no-empty-file".to_string(),
-                    "no-consecutive-empty-lines".to_string(),
-                    "no-tabs".to_string(),
-                    "final-newline".to_string(),
-                    "no-mixed-line-endings".to_string(),
-                ];
-                for rule in all_rules {
+                for rule in expand_rule_names(vec!["ALL".to_string()]) {
                     if !config.rule_set.enabled_rules.contains(&rule) {
                         config.rule_set.enabled_rules.push(rule);
                     }
+                }
+            }
+
+            if validate_config {
+                let errors = validate_config_errors(&config);
+                if errors.is_empty() {
+                    println!("Config is valid.");
+                    return Ok(());
+                } else {
+                    for err in &errors {
+                        eprintln!("Config error: {}", err);
+                    }
+                    std::process::exit(1);
                 }
             }
 
@@ -708,6 +898,8 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
+            let per_dir_configs = discover_per_dir_configs(&config.paths, &config);
+
             let output_format = match output.as_deref() {
                 Some("json") => OutputFormat::Json,
                 Some("markdown") => OutputFormat::Markdown,
@@ -721,13 +913,16 @@ fn main() -> anyhow::Result<()> {
             };
             config.output_format = output_format.clone();
 
-            let cache_path = cache_location.unwrap_or_else(|| std::path::PathBuf::from(".lint_cache.json"));
+            let cache_path =
+                cache_location.unwrap_or_else(|| std::path::PathBuf::from(".lint_cache.json"));
             let cache: Option<std::sync::Arc<std::sync::Mutex<lint::cache::Cache>>> = if no_cache {
                 None
             } else if cache {
                 match lint::cache::Cache::load(&cache_path) {
                     Ok(c) => Some(std::sync::Arc::new(std::sync::Mutex::new(c))),
-                    Err(_) => Some(std::sync::Arc::new(std::sync::Mutex::new(lint::cache::Cache::new()))),
+                    Err(_) => Some(std::sync::Arc::new(std::sync::Mutex::new(
+                        lint::cache::Cache::new(),
+                    ))),
                 }
             } else {
                 None
@@ -735,28 +930,34 @@ fn main() -> anyhow::Result<()> {
 
             if watch {
                 println!("Watching for changes... Press Ctrl+C to stop.");
-                run_lint_and_print(&config, cache.clone(), RunOptions {
-                    fix,
-                    fix_only,
-                    diff,
-                    check,
-                    quiet,
-                    verbose,
-                    statistics,
-                    show_fixes,
-                    add_noqa,
-                    exit_zero,
-                    exit_non_zero_on_fix,
-                    deny_warnings,
-                    unsafe_fixes,
-                    max_warnings,
-                    max_diagnostics,
-                    output_format: &output_format,
-                    output_file: output_file.as_ref(),
-                    baseline: baseline.as_ref(),
-                    fixable: fixable.as_deref(),
-                    unfixable: unfixable.as_deref(),
-                })?;
+                run_lint_and_print(
+                    &config,
+                    cache.clone(),
+                    RunOptions {
+                        fix,
+                        fix_only,
+                        diff,
+                        check,
+                        quiet,
+                        verbose,
+                        statistics,
+                        show_fixes,
+                        add_noqa,
+                        exit_zero,
+                        exit_non_zero_on_fix,
+                        deny_warnings,
+                        unsafe_fixes,
+                        max_warnings,
+                        max_diagnostics,
+                        output_format: &output_format,
+                        output_file: output_file.as_ref(),
+                        baseline: baseline.as_ref(),
+                        fixable: fixable.as_deref(),
+                        unfixable: unfixable.as_deref(),
+                        progress,
+                        per_dir_configs: per_dir_configs.clone(),
+                    },
+                )?;
 
                 let (tx, rx) = std::sync::mpsc::channel();
                 let mut watcher = notify::recommended_watcher(move |res| {
@@ -776,53 +977,65 @@ fn main() -> anyhow::Result<()> {
                 for event in rx {
                     if event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove() {
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        run_lint_and_print(&config, cache.clone(), RunOptions {
-                            fix,
-                            fix_only,
-                            diff,
-                            check,
-                            quiet,
-                            verbose,
-                            statistics,
-                            show_fixes,
-                            add_noqa,
-                            exit_zero,
-                            exit_non_zero_on_fix,
-                            deny_warnings,
-                            unsafe_fixes,
-                            max_warnings,
-                            max_diagnostics,
-                            output_format: &output_format,
-                            output_file: output_file.as_ref(),
-                            baseline: baseline.as_ref(),
-                            fixable: fixable.as_deref(),
-                            unfixable: unfixable.as_deref(),
-                        })?;
+                        run_lint_and_print(
+                            &config,
+                            cache.clone(),
+                            RunOptions {
+                                fix,
+                                fix_only,
+                                diff,
+                                check,
+                                quiet,
+                                verbose,
+                                statistics,
+                                show_fixes,
+                                add_noqa,
+                                exit_zero,
+                                exit_non_zero_on_fix,
+                                deny_warnings,
+                                unsafe_fixes,
+                                max_warnings,
+                                max_diagnostics,
+                                output_format: &output_format,
+                                output_file: output_file.as_ref(),
+                                baseline: baseline.as_ref(),
+                                fixable: fixable.as_deref(),
+                                unfixable: unfixable.as_deref(),
+                                progress,
+                                per_dir_configs: per_dir_configs.clone(),
+                            },
+                        )?;
                     }
                 }
             } else {
-                let exit_code = run_lint_and_print(&config, cache.clone(), RunOptions {
-                    fix,
-                    fix_only,
-                    diff,
-                    check,
-                    quiet,
-                    verbose,
-                    statistics,
-                    show_fixes,
-                    add_noqa,
-                    exit_zero,
-                    exit_non_zero_on_fix,
-                    deny_warnings,
-                    unsafe_fixes,
-                    max_warnings,
-                    max_diagnostics,
-                    output_format: &output_format,
-                    output_file: output_file.as_ref(),
-                    baseline: baseline.as_ref(),
-                    fixable: fixable.as_deref(),
-                    unfixable: unfixable.as_deref(),
-                })?;
+                let exit_code = run_lint_and_print(
+                    &config,
+                    cache.clone(),
+                    RunOptions {
+                        fix,
+                        fix_only,
+                        diff,
+                        check,
+                        quiet,
+                        verbose,
+                        statistics,
+                        show_fixes,
+                        add_noqa,
+                        exit_zero,
+                        exit_non_zero_on_fix,
+                        deny_warnings,
+                        unsafe_fixes,
+                        max_warnings,
+                        max_diagnostics,
+                        output_format: &output_format,
+                        output_file: output_file.as_ref(),
+                        baseline: baseline.as_ref(),
+                        fixable: fixable.as_deref(),
+                        unfixable: unfixable.as_deref(),
+                        progress,
+                        per_dir_configs: per_dir_configs.clone(),
+                    },
+                )?;
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }
@@ -851,32 +1064,165 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn explain_rule(rule_name: &str) -> anyhow::Result<()> {
-    let rule_set = lint::rules::RuleSet::new()
-        .add_rule(Box::new(lint::rules::LineLengthRule { max_length: 100 }))
-        .add_rule(Box::new(lint::rules::TrailingWhitespaceRule))
-        .add_rule(Box::new(lint::rules::NoTodoRule::default()))
-        .add_rule(Box::new(lint::rules::NoEmptyFileRule))
-        .add_rule(Box::new(lint::rules::NoConsecutiveEmptyLinesRule))
-        .add_rule(Box::new(lint::rules::NoTabsRule));
+/// Validates a loaded config and returns a list of human-readable errors.
+fn validate_config_errors(config: &lint::Config) -> Vec<String> {
+    let mut errors = Vec::new();
+    let known_rules: std::collections::HashSet<String> =
+        lint::rules::known_rules().into_iter().collect();
+    let known_plugins: std::collections::HashSet<String> =
+        lint::rules::known_plugins().into_iter().collect();
 
-    for rule in rule_set.get_rules() {
-        if rule.name() == rule_name {
-            println!("Rule: {}", rule.name());
-            println!("Category: {}", rule.category());
-            println!("Description: {}", rule.description());
-            return Ok(());
+    // Check enabled rules
+    for rule in &config.rule_set.enabled_rules {
+        let resolved = lint::rules::name_from_code(rule);
+        if !known_rules.contains(rule) && !known_rules.contains(resolved) {
+            errors.push(format!("Unknown rule '{}' in enabled_rules", rule));
         }
     }
 
-    let lang_set = lint::language_rules::LanguageRuleSet::new();
-    for rule in lang_set.get_rules() {
-        if rule.name() == rule_name {
-            println!("Rule: {}", rule.name());
-            println!("Category: {}", rule.category());
-            println!("Description: {}", rule.description());
-            return Ok(());
+    // Check severity_overrides keys
+    for rule in config.severity_overrides.keys() {
+        let resolved = lint::rules::name_from_code(rule);
+        if !known_rules.contains(rule) && !known_rules.contains(resolved) {
+            errors.push(format!("Unknown rule '{}' in severity_overrides", rule));
         }
+    }
+
+    // Check plugins
+    for plugin in &config.plugins {
+        if !known_plugins.contains(plugin) {
+            errors.push(format!("Unknown plugin '{}'", plugin));
+        }
+    }
+
+    errors
+}
+
+#[cfg(test)]
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_changed_files(changed: bool, staged: bool) -> anyhow::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+
+    if changed {
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", "HEAD"])
+            .output()?;
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if !line.is_empty() {
+                    files.push(PathBuf::from(line));
+                }
+            }
+        }
+    }
+
+    if staged {
+        let output = std::process::Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .output()?;
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if !line.is_empty() && !files.contains(&PathBuf::from(line)) {
+                    files.push(PathBuf::from(line));
+                }
+            }
+        }
+    }
+
+    Ok(files)
+}
+
+/// Expands any category names (e.g., "style", "security") or "ALL" into their
+/// constituent rule names. Also resolves rule codes (e.g., "W001") to names.
+/// Rule names that are not categories pass through.
+fn expand_rule_names(names: Vec<String>) -> Vec<String> {
+    let mut expanded = Vec::new();
+    for name in names {
+        if name.eq_ignore_ascii_case("ALL") {
+            for rule in lint::rules::known_rules() {
+                if !expanded.contains(&rule) {
+                    expanded.push(rule);
+                }
+            }
+            for rule in lint::language_rules::LanguageRuleSet::known_rules() {
+                if !expanded.contains(&rule) {
+                    expanded.push(rule);
+                }
+            }
+        } else if lint::rules::is_category(&name) {
+            for rule in lint::rules::category_rules(&name) {
+                if !expanded.contains(&rule) {
+                    expanded.push(rule);
+                }
+            }
+        } else {
+            let resolved = lint::rules::name_from_code(&name).to_string();
+            if resolved != name && !expanded.contains(&resolved) {
+                expanded.push(resolved);
+            } else if !expanded.contains(&name) {
+                expanded.push(name);
+            }
+        }
+    }
+    expanded
+}
+
+fn explain_rule(rule_name: &str) -> anyhow::Result<()> {
+    let config = lint::ConfigBuilder::new().build();
+    let linter = lint::Linter::new(&config);
+
+    let resolved_name = lint::rules::name_from_code(rule_name);
+    let lookup_name = if resolved_name != rule_name {
+        resolved_name
+    } else {
+        rule_name
+    };
+
+    let found = linter
+        .rule_set()
+        .get_rules()
+        .iter()
+        .find(|r| r.name() == lookup_name)
+        .map(|r| {
+            (
+                r.name(),
+                r.category(),
+                r.description(),
+                r.has_fix(),
+                r.code(),
+            )
+        })
+        .or_else(|| {
+            linter
+                .language_rule_set()
+                .get_rules()
+                .iter()
+                .find(|r| r.name() == lookup_name)
+                .map(|r| {
+                    (
+                        r.name(),
+                        r.category(),
+                        r.description(),
+                        r.has_fix(),
+                        r.code(),
+                    )
+                })
+        });
+
+    if let Some((name, category, description, has_fix, code)) = found {
+        println!("Rule: {}", name);
+        println!("Code: {}", code);
+        println!("Category: {}", category);
+        println!("Description: {}", description);
+        println!("Auto-fix: {}", if has_fix { "yes" } else { "no" });
+        return Ok(());
     }
 
     anyhow::bail!("Unknown rule: {}", rule_name);
@@ -934,13 +1280,19 @@ fn render_github(results: &[lint::LintResult]) -> String {
         let file = escape_github_command(&file);
         for msg in &result.messages {
             let level = severity_to_github_command(msg.severity);
+            let code = lint::rules::code_from_name(&msg.rule);
+            let title = if code != msg.rule {
+                format!("{} ({})", code, msg.rule)
+            } else {
+                msg.rule.clone()
+            };
             out.push_str(&format!(
                 "::{level} file={file},line={line},col={col},title={title}::{message}\n",
                 level = level,
                 file = file,
                 line = msg.line,
                 col = msg.column,
-                title = escape_github_command(&msg.rule),
+                title = escape_github_command(&title),
                 message = escape_github_command(&msg.message),
             ));
         }
@@ -962,10 +1314,11 @@ fn render_sarif(results: &[lint::LintResult]) -> String {
                 lint::Severity::Info => "note",
             };
 
-            rules_seen.insert(msg.rule.clone());
+            let code = lint::rules::code_from_name(&msg.rule);
+            rules_seen.insert(code.to_string());
 
             sarif_results.push(json!({
-                "ruleId": msg.rule,
+                "ruleId": code,
                 "level": level,
                 "message": {
                     "text": msg.message
@@ -985,14 +1338,26 @@ fn render_sarif(results: &[lint::LintResult]) -> String {
         }
     }
 
-    let rules: Vec<_> = rules_seen.into_iter().map(|r| {
-        json!({
-            "id": r,
-            "defaultConfiguration": {
-                "level": "warning"
-            }
+    let rules: Vec<_> = rules_seen
+        .into_iter()
+        .map(|code| {
+            let name = lint::rules::name_from_code(&code);
+            let short_desc = if name != code {
+                format!("{} ({})", code, name)
+            } else {
+                code.clone()
+            };
+            json!({
+                "id": code,
+                "shortDescription": {
+                    "text": short_desc
+                },
+                "defaultConfiguration": {
+                    "level": "warning"
+                }
+            })
         })
-    }).collect();
+        .collect();
 
     let doc = json!({
         "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json",
@@ -1033,6 +1398,7 @@ fn render_junit(results: &[lint::LintResult]) -> String {
             escape_xml(&file)
         ));
         for msg in &result.messages {
+            let code = lint::rules::code_from_name(&msg.rule);
             out.push_str(&format!(
                 "    <testcase name=\"{}\" classname=\"{}\">\n",
                 escape_xml(&msg.rule),
@@ -1041,7 +1407,7 @@ fn render_junit(results: &[lint::LintResult]) -> String {
             out.push_str(&format!(
                 "      <failure message=\"{}\" type=\"{}\">\n",
                 escape_xml(&msg.message),
-                escape_xml(&msg.rule)
+                escape_xml(code)
             ));
             out.push_str(&format!(
                 "        {}:{}:{} - {} [{}]\n",
@@ -1049,7 +1415,7 @@ fn render_junit(results: &[lint::LintResult]) -> String {
                 msg.line,
                 msg.column,
                 escape_xml(&msg.message),
-                escape_xml(&msg.rule)
+                escape_xml(code)
             ));
             out.push_str("      </failure>\n");
             out.push_str("    </testcase>\n");
@@ -1080,9 +1446,10 @@ fn render_gitlab(results: &[lint::LintResult]) -> String {
                 lint::Severity::Warning => "major",
                 lint::Severity::Info => "info",
             };
+            let code = lint::rules::code_from_name(&msg.rule);
             issues.push(json!({
                 "description": msg.message,
-                "check_name": msg.rule,
+                "check_name": code,
                 "fingerprint": format!("{}:{}:{}", result.file_path.display(), msg.line, msg.column),
                 "severity": severity,
                 "location": {
@@ -1122,7 +1489,10 @@ fn render_grouped(results: &[lint::LintResult]) -> String {
         if result.messages.is_empty() {
             continue;
         }
-        out.push_str(&format!("{}\n", format!("{}", result.file_path.display()).bold()));
+        out.push_str(&format!(
+            "{}\n",
+            format!("{}", result.file_path.display()).bold()
+        ));
         for msg in &result.messages {
             let (prefix, color) = match msg.severity {
                 lint::Severity::Error => ("error", colored::Color::Red),
@@ -1143,7 +1513,12 @@ fn render_grouped(results: &[lint::LintResult]) -> String {
     out
 }
 
-fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bool, show_source: bool) -> String {
+fn render_results(
+    results: &[lint::LintResult],
+    format: &OutputFormat,
+    quiet: bool,
+    show_source: bool,
+) -> String {
     match format {
         OutputFormat::Json => {
             if quiet {
@@ -1164,7 +1539,11 @@ fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bo
             let mut out = String::new();
             for result in results {
                 let relevant: Vec<_> = if quiet {
-                    result.messages.iter().filter(|m| m.severity == lint::Severity::Error).collect()
+                    result
+                        .messages
+                        .iter()
+                        .filter(|m| m.severity == lint::Severity::Error)
+                        .collect()
                 } else {
                     result.messages.iter().collect()
                 };
@@ -1215,17 +1594,27 @@ fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bo
 
             for result in results {
                 let relevant: Vec<_> = if quiet {
-                    result.messages.iter().filter(|m| m.severity == lint::Severity::Error).collect()
+                    result
+                        .messages
+                        .iter()
+                        .filter(|m| m.severity == lint::Severity::Error)
+                        .collect()
                 } else {
                     result.messages.iter().collect()
                 };
 
                 if relevant.is_empty() {
                     if !quiet && result.messages.is_empty() {
-                        out.push_str(&format!("{}: No issues found\n", result.file_path.display()));
+                        out.push_str(&format!(
+                            "{}: No issues found\n",
+                            result.file_path.display()
+                        ));
                     }
                 } else {
-                    out.push_str(&format!("{}\n", format!("{}", result.file_path.display()).bold()));
+                    out.push_str(&format!(
+                        "{}\n",
+                        format!("{}", result.file_path.display()).bold()
+                    ));
                     let lines: Vec<&str> = result.file_content.lines().collect();
                     for msg in relevant {
                         let (prefix, color) = match msg.severity {
@@ -1244,26 +1633,43 @@ fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bo
                         };
 
                         let fix_indicator = if msg.fix.is_some() { "[*] " } else { "" };
+                        let code = lint::rules::code_from_name(&msg.rule);
                         out.push_str(&format!(
-                            "  {}:{} {}{}: {}\n",
+                            "  {}:{} {}{}[{}] {}: {}\n",
                             msg.line,
                             msg.column,
                             fix_indicator.dimmed(),
+                            if fix_indicator.is_empty() { "" } else { " " },
+                            code.dimmed(),
                             prefix.color(color),
                             msg.message
                         ));
 
                         #[allow(clippy::collapsible_if)]
                         if show_source {
-                            if let Some(source_line) = lines.get(msg.line.saturating_sub(1)) {
+                            let line_idx = msg.line.saturating_sub(1);
+                            if line_idx > 0 {
+                                if let Some(prev) = lines.get(line_idx - 1) {
+                                    out.push_str(&format!("    | {}\n", prev.dimmed()));
+                                }
+                            }
+                            if let Some(source_line) = lines.get(line_idx) {
                                 out.push_str(&format!("    | {}\n", source_line));
-                                let caret = format!("    |{}^", " ".repeat(msg.column.saturating_sub(1)));
+                                let caret =
+                                    format!("    |{}^", " ".repeat(msg.column.saturating_sub(1)));
                                 out.push_str(&format!("{}\n", caret.dimmed()));
+                            }
+                            if let Some(next) = lines.get(line_idx + 1) {
+                                out.push_str(&format!("    | {}\n", next.dimmed()));
                             }
                         }
 
                         if let Some(suggestion) = &msg.suggestion {
-                            out.push_str(&format!("    {} help: {}\n", "→".dimmed(), suggestion.dimmed()));
+                            out.push_str(&format!(
+                                "    {} help: {}\n",
+                                "→".dimmed(),
+                                suggestion.dimmed()
+                            ));
                         }
                     }
                     out.push('\n');
@@ -1283,7 +1689,12 @@ fn render_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bo
     }
 }
 
-fn print_results(results: &[lint::LintResult], format: &OutputFormat, quiet: bool, show_source: bool) {
+fn print_results(
+    results: &[lint::LintResult],
+    format: &OutputFormat,
+    quiet: bool,
+    show_source: bool,
+) {
     print!("{}", render_results(results, format, quiet, show_source));
 }
 
@@ -1306,42 +1717,56 @@ fn find_config_file() -> Option<PathBuf> {
 }
 
 fn list_rules() {
+    let config = lint::ConfigBuilder::new().build();
+    let linter = lint::Linter::new(&config);
+
     println!("Available rules (generic, apply to all files):");
-    println!("  [style]        line-length                - Lines exceeding max length (fix: break line)");
-    println!("  [style]        trailing-whitespace         - Trailing spaces/tabs (fix: remove)");
-    println!("  [style]        no-empty-file             - Empty files with no content");
-    println!("  [style]        no-consecutive-empty-lines - Multiple consecutive blank lines");
-    println!("  [style]        no-tabs                    - Tab characters (fix: replace with 4 spaces)");
-    println!("  [style]        final-newline              - Missing newline at end of file (fix: add)");
-    println!("  [style]        no-mixed-line-endings    - Mixed CRLF and LF line endings");
-    println!("  [correctness]  no-todo                    - TODO/FIXME comments (fix: address or create issue)");
+    for rule in linter.rule_set().get_rules() {
+        let fix_marker = if rule.has_fix() {
+            " (has auto-fix)"
+        } else {
+            ""
+        };
+        println!(
+            "  [{:13}] {} {}{}",
+            rule.category(),
+            rule.code(),
+            rule.name(),
+            fix_marker
+        );
+        if !rule.description().is_empty() {
+            println!("                   {}", rule.description());
+        }
+    }
+
     println!();
     println!("Language-specific rules (auto-applied by file extension):");
-    println!("  JS/TS:    no-console-log, no-var");
-    println!("  Python:   no-print, python-style");
-    println!("  Rust:     no-unwrap, no-expect");
-    println!("  Java:     java-style (PascalCase, no System.out)");
-    println!("  Go:       go-style");
-    println!("  Ruby:     no-puts, ruby-style");
-    println!("  PHP:      no-echo");
-    println!("  Swift:    no-swift-print");
-    println!("  Kotlin:   kotlin-style");
-    println!("  Dart:     no-dart-print");
-    println!("  C#:       no-csharp-console, csharp-style");
-    println!("  Shell:    shell-echo-quote");
-    println!("  SQL:      sql-no-select-star");
-    println!("  Lua:      no-lua-print");
-    println!("  Scala:    no-scala-println");
-    println!("  R:        no-r-print");
-    println!("  Zig:      no-zig-debug-print");
-    println!("  HTML:     html-no-inline-style, html-img-alt");
-    println!("  CSS:      css-avoid-important");
+    for rule in linter.language_rule_set().get_rules() {
+        let fix_marker = if rule.has_fix() {
+            " (has auto-fix)"
+        } else {
+            ""
+        };
+        println!(
+            "  [{:13}] {} {}{}",
+            rule.category(),
+            rule.code(),
+            rule.name(),
+            fix_marker
+        );
+        if !rule.description().is_empty() {
+            println!("                   {}", rule.description());
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // Serialize tests that change the process current directory.
+    static CURRENT_DIR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_load_config_file_success() -> anyhow::Result<()> {
@@ -1366,7 +1791,10 @@ mod tests {
         let config = load_config_file(&temp_file.path().to_path_buf())?;
         assert_eq!(config.paths, vec![PathBuf::from("src")]);
         assert_eq!(config.max_line_length, Some(120));
-        assert_eq!(config.rule_set.enabled_rules, vec!["line-length".to_string()]);
+        assert_eq!(
+            config.rule_set.enabled_rules,
+            vec!["line-length".to_string()]
+        );
         assert_eq!(config.output_format, OutputFormat::Json);
 
         Ok(())
@@ -1445,9 +1873,20 @@ mod tests {
                 preview,
                 no_show_source,
                 no_gitignore,
+                changed,
+                staged,
+                plugin,
+                progress,
+                validate_config,
+                max_nesting_depth,
+                max_function_lines,
             } => {
                 let _ = no_cache;
                 let _ = no_config;
+                let _ = progress;
+                let _ = validate_config;
+                let _ = max_nesting_depth;
+                let _ = max_function_lines;
                 let _ = check;
                 let _ = max_diagnostics;
                 let _ = baseline;
@@ -1460,6 +1899,9 @@ mod tests {
                 let _ = preview;
                 let _ = no_show_source;
                 let _ = no_gitignore;
+                let _ = changed;
+                let _ = staged;
+                let _ = plugin;
                 assert_eq!(paths, vec![PathBuf::from("src/")]);
                 assert_eq!(output, Some("json".to_string()));
                 assert_eq!(max_line_length, None);
@@ -1762,7 +2204,10 @@ mod tests {
     fn test_cli_no_error_on_unmatched_pattern_parsing() {
         let cli = Cli::parse_from(["lint", "lint", "src/", "--no-error-on-unmatched-pattern"]);
         match cli.command {
-            Commands::Lint { no_error_on_unmatched_pattern, .. } => {
+            Commands::Lint {
+                no_error_on_unmatched_pattern,
+                ..
+            } => {
                 assert!(no_error_on_unmatched_pattern);
             }
             _ => panic!("Expected Lint command"),
@@ -1784,7 +2229,10 @@ mod tests {
     fn test_cli_exit_non_zero_on_fix_parsing() {
         let cli = Cli::parse_from(["lint", "lint", "src/", "--exit-non-zero-on-fix"]);
         match cli.command {
-            Commands::Lint { exit_non_zero_on_fix, .. } => {
+            Commands::Lint {
+                exit_non_zero_on_fix,
+                ..
+            } => {
                 assert!(exit_non_zero_on_fix);
             }
             _ => panic!("Expected Lint command"),
@@ -1826,10 +2274,21 @@ mod tests {
 
     #[test]
     fn test_cli_exclude_parsing() {
-        let cli = Cli::parse_from(["lint", "lint", "src/", "--exclude", "vendor", "--exclude", "*.min.js"]);
+        let cli = Cli::parse_from([
+            "lint",
+            "lint",
+            "src/",
+            "--exclude",
+            "vendor",
+            "--exclude",
+            "*.min.js",
+        ]);
         match cli.command {
             Commands::Lint { exclude, .. } => {
-                assert_eq!(exclude, Some(vec!["vendor".to_string(), "*.min.js".to_string()]));
+                assert_eq!(
+                    exclude,
+                    Some(vec!["vendor".to_string(), "*.min.js".to_string()])
+                );
             }
             _ => panic!("Expected Lint command"),
         }
@@ -1848,7 +2307,13 @@ mod tests {
 
     #[test]
     fn test_cli_cache_location_parsing() {
-        let cli = Cli::parse_from(["lint", "lint", "src/", "--cache-location", "/tmp/lint_cache.json"]);
+        let cli = Cli::parse_from([
+            "lint",
+            "lint",
+            "src/",
+            "--cache-location",
+            "/tmp/lint_cache.json",
+        ]);
         match cli.command {
             Commands::Lint { cache_location, .. } => {
                 assert_eq!(cache_location, Some(PathBuf::from("/tmp/lint_cache.json")));
@@ -1905,7 +2370,10 @@ mod tests {
     fn test_cli_ignore_suppressions_parsing() {
         let cli = Cli::parse_from(["lint", "lint", "src/", "--ignore-suppressions"]);
         match cli.command {
-            Commands::Lint { ignore_suppressions, .. } => {
+            Commands::Lint {
+                ignore_suppressions,
+                ..
+            } => {
                 assert!(ignore_suppressions);
             }
             _ => panic!("Expected Lint command"),
@@ -1967,6 +2435,7 @@ mod tests {
 
     #[test]
     fn test_find_config_file_discovers_lint_json() {
+        let _guard = CURRENT_DIR_MUTEX.lock().unwrap();
         use std::io::Write;
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join(".lint.json");
@@ -1999,7 +2468,11 @@ mod tests {
     fn test_cli_stdin_filename_parsing() {
         let cli = Cli::parse_from(["lint", "lint", "--stdin", "--stdin-filename", "test.rs"]);
         match cli.command {
-            Commands::Lint { stdin, stdin_filename, .. } => {
+            Commands::Lint {
+                stdin,
+                stdin_filename,
+                ..
+            } => {
                 assert!(stdin);
                 assert_eq!(stdin_filename, Some("test.rs".to_string()));
             }
@@ -2009,9 +2482,19 @@ mod tests {
 
     #[test]
     fn test_cli_stdin_file_path_alias_parsing() {
-        let cli = Cli::parse_from(["lint", "lint", "--stdin", "--stdin-file-path", "src/main.rs"]);
+        let cli = Cli::parse_from([
+            "lint",
+            "lint",
+            "--stdin",
+            "--stdin-file-path",
+            "src/main.rs",
+        ]);
         match cli.command {
-            Commands::Lint { stdin, stdin_filename, .. } => {
+            Commands::Lint {
+                stdin,
+                stdin_filename,
+                ..
+            } => {
                 assert!(stdin);
                 assert_eq!(stdin_filename, Some("src/main.rs".to_string()));
             }
@@ -2039,10 +2522,8 @@ mod tests {
     }
 
     fn sample_result() -> lint::LintResult {
-        let mut result = lint::LintResult::new(
-            PathBuf::from("src/main.rs"),
-            "let x = 5;   \n".to_string(),
-        );
+        let mut result =
+            lint::LintResult::new(PathBuf::from("src/main.rs"), "let x = 5;   \n".to_string());
         result.add_message(lint::LintMessage::new(
             1,
             10,
@@ -2076,23 +2557,26 @@ mod tests {
         let out = render_github(&results);
 
         assert!(
-            out.contains("::warning file=src/main.rs,line=1,col=10,title=trailing-whitespace::Trailing whitespace\n"),
+            out.contains("::warning file=src/main.rs,line=1,col=10,title=W002 (trailing-whitespace)::Trailing whitespace\n"),
             "warning line missing/malformed: {out}"
         );
         assert!(
-            out.contains("::error file=src/main.rs,line=2,col=1,title=line-length::Line too long\n"),
+            out.contains(
+                "::error file=src/main.rs,line=2,col=1,title=W001 (line-length)::Line too long\n"
+            ),
             "error line missing/malformed: {out}"
         );
         assert!(
-            out.contains("::notice file=src/main.rs,line=3,col=1,title=no-todo::Found TODO\n"),
+            out.contains(
+                "::notice file=src/main.rs,line=3,col=1,title=W003 (no-todo)::Found TODO\n"
+            ),
             "notice line missing/malformed: {out}"
         );
     }
 
     #[test]
     fn test_render_github_escapes_message() {
-        let mut result =
-            lint::LintResult::new(PathBuf::from("src/a.rs"), "x".to_string());
+        let mut result = lint::LintResult::new(PathBuf::from("src/a.rs"), "x".to_string());
         result.add_message(lint::LintMessage::new(
             1,
             1,
@@ -2118,9 +2602,23 @@ mod tests {
     #[test]
     fn test_render_grouped_groups_by_file() {
         let mut r1 = lint::LintResult::new(PathBuf::from("a.rs"), "x".to_string());
-        r1.add_message(lint::LintMessage::new(1, 1, lint::Severity::Error, "e1".to_string(), "r1".to_string(), None));
+        r1.add_message(lint::LintMessage::new(
+            1,
+            1,
+            lint::Severity::Error,
+            "e1".to_string(),
+            "r1".to_string(),
+            None,
+        ));
         let mut r2 = lint::LintResult::new(PathBuf::from("b.rs"), "y".to_string());
-        r2.add_message(lint::LintMessage::new(2, 3, lint::Severity::Warning, "w1".to_string(), "r2".to_string(), None));
+        r2.add_message(lint::LintMessage::new(
+            2,
+            3,
+            lint::Severity::Warning,
+            "w1".to_string(),
+            "r2".to_string(),
+            None,
+        ));
         let clean = lint::LintResult::new(PathBuf::from("c.rs"), "z".to_string());
 
         let out = render_grouped(&[r1, r2, clean]);
@@ -2134,7 +2632,8 @@ mod tests {
 
     #[test]
     fn test_render_sarif_produces_valid_json() {
-        let mut result = lint::LintResult::new(PathBuf::from("src/main.rs"), "let x = 5;   \n".to_string());
+        let mut result =
+            lint::LintResult::new(PathBuf::from("src/main.rs"), "let x = 5;   \n".to_string());
         result.add_message(lint::LintMessage::new(
             1,
             10,
@@ -2146,7 +2645,7 @@ mod tests {
         let out = render_sarif(&[result]);
         assert!(out.contains("\"$schema\""));
         assert!(out.contains("\"version\": \"2.1.0\""));
-        assert!(out.contains("\"ruleId\": \"trailing-whitespace\""));
+        assert!(out.contains("\"ruleId\": \"W002\""));
         assert!(out.contains("\"level\": \"warning\""));
         assert!(out.contains("\"startLine\": 1"));
         assert!(out.contains("\"startColumn\": 10"));
@@ -2216,8 +2715,14 @@ mod tests {
         let local = ConfigBuilder::new().per_file_ignores(local_ignores).build();
 
         let merged = merge_configs(base, local);
-        assert_eq!(merged.per_file_ignores.get("tests/**/*.rs"), Some(&vec!["no-todo".to_string()]));
-        assert_eq!(merged.per_file_ignores.get("src/**/*.rs"), Some(&vec!["line-length".to_string()]));
+        assert_eq!(
+            merged.per_file_ignores.get("tests/**/*.rs"),
+            Some(&vec!["no-todo".to_string()])
+        );
+        assert_eq!(
+            merged.per_file_ignores.get("src/**/*.rs"),
+            Some(&vec!["line-length".to_string()])
+        );
     }
 
     #[test]
@@ -2282,13 +2787,21 @@ mod tests {
                 baseline: None,
                 fixable: None,
                 unfixable: None,
+                progress: false,
+                per_dir_configs: std::collections::HashMap::new(),
             },
         )?;
 
-        assert_eq!(exit_code, 1, "check mode should exit 1 when fixable violations exist");
+        assert_eq!(
+            exit_code, 1,
+            "check mode should exit 1 when fixable violations exist"
+        );
 
         let content = std::fs::read_to_string(&file_path)?;
-        assert_eq!(content, "let x = 5;   \n", "check mode should not modify files");
+        assert_eq!(
+            content, "let x = 5;   \n",
+            "check mode should not modify files"
+        );
 
         Ok(())
     }
@@ -2297,7 +2810,9 @@ mod tests {
     fn test_cli_max_diagnostics_parsing() {
         let cli = Cli::parse_from(["lint", "lint", "src/", "--max-diagnostics", "50"]);
         match cli.command {
-            Commands::Lint { max_diagnostics, .. } => {
+            Commands::Lint {
+                max_diagnostics, ..
+            } => {
                 assert_eq!(max_diagnostics, Some(50));
             }
             _ => panic!("Expected Lint command"),
@@ -2311,10 +2826,24 @@ mod tests {
             lint::LintResult::new(PathBuf::from("b.rs"), "y".to_string()),
         ];
         for _ in 0..3 {
-            results[0].add_message(lint::LintMessage::new(1, 1, lint::Severity::Warning, "w1".to_string(), "r1".to_string(), None));
+            results[0].add_message(lint::LintMessage::new(
+                1,
+                1,
+                lint::Severity::Warning,
+                "w1".to_string(),
+                "r1".to_string(),
+                None,
+            ));
         }
         for _ in 0..3 {
-            results[1].add_message(lint::LintMessage::new(1, 1, lint::Severity::Warning, "w2".to_string(), "r2".to_string(), None));
+            results[1].add_message(lint::LintMessage::new(
+                1,
+                1,
+                lint::Severity::Warning,
+                "w2".to_string(),
+                "r2".to_string(),
+                None,
+            ));
         }
 
         let hidden = truncate_diagnostics(&mut results, Some(4));
@@ -2325,11 +2854,19 @@ mod tests {
 
     #[test]
     fn test_truncate_diagnostics_no_limit() {
-        let mut results = vec![
-            lint::LintResult::new(PathBuf::from("a.rs"), "x".to_string()),
-        ];
+        let mut results = vec![lint::LintResult::new(
+            PathBuf::from("a.rs"),
+            "x".to_string(),
+        )];
         for _ in 0..5 {
-            results[0].add_message(lint::LintMessage::new(1, 1, lint::Severity::Warning, "w".to_string(), "r".to_string(), None));
+            results[0].add_message(lint::LintMessage::new(
+                1,
+                1,
+                lint::Severity::Warning,
+                "w".to_string(),
+                "r".to_string(),
+                None,
+            ));
         }
 
         let hidden = truncate_diagnostics(&mut results, None);
@@ -2341,25 +2878,39 @@ mod tests {
     fn test_load_config_file_toml() -> anyhow::Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let config_path = temp_dir.path().join(".lint.toml");
-        std::fs::write(&config_path, r#"
+        std::fs::write(
+            &config_path,
+            r#"
 paths = ["src"]
 max_line_length = 120
 
 [rule_set]
 enabled_rules = ["line-length", "no-todo"]
-"#)?;
+"#,
+        )?;
 
         let config = load_config_file(&config_path)?;
         assert_eq!(config.max_line_length, Some(120));
         assert_eq!(config.paths, vec![PathBuf::from("src")]);
-        assert!(config.rule_set.enabled_rules.contains(&"line-length".to_string()));
-        assert!(config.rule_set.enabled_rules.contains(&"no-todo".to_string()));
+        assert!(
+            config
+                .rule_set
+                .enabled_rules
+                .contains(&"line-length".to_string())
+        );
+        assert!(
+            config
+                .rule_set
+                .enabled_rules
+                .contains(&"no-todo".to_string())
+        );
 
         Ok(())
     }
 
     #[test]
     fn test_find_config_file_discovers_lint_toml() {
+        let _guard = CURRENT_DIR_MUTEX.lock().unwrap();
         use std::io::Write;
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join(".lint.toml");
@@ -2372,7 +2923,10 @@ enabled_rules = ["line-length", "no-todo"]
         std::env::set_current_dir(original_dir).unwrap();
 
         assert!(found.is_some());
-        assert_eq!(found.unwrap().file_name(), Some(std::ffi::OsStr::new(".lint.toml")));
+        assert_eq!(
+            found.unwrap().file_name(),
+            Some(std::ffi::OsStr::new(".lint.toml"))
+        );
     }
 
     #[test]
@@ -2388,21 +2942,32 @@ enabled_rules = ["line-length", "no-todo"]
 
     #[test]
     fn test_filter_baseline_removes_known_violations() {
-        let mut results = vec![
-            lint::LintResult::new(PathBuf::from("src/main.rs"), "let x = 5;\n".to_string()),
-        ];
+        let mut results = vec![lint::LintResult::new(
+            PathBuf::from("src/main.rs"),
+            "let x = 5;\n".to_string(),
+        )];
         results[0].add_message(lint::LintMessage::new(
-            1, 1, lint::Severity::Warning, "Trailing whitespace".to_string(),
-            "trailing-whitespace".to_string(), None,
+            1,
+            1,
+            lint::Severity::Warning,
+            "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(),
+            None,
         ));
         results[0].add_message(lint::LintMessage::new(
-            2, 1, lint::Severity::Warning, "Line too long".to_string(),
-            "line-length".to_string(), None,
+            2,
+            1,
+            lint::Severity::Warning,
+            "Line too long".to_string(),
+            "line-length".to_string(),
+            None,
         ));
 
-        let baseline = vec![
-            BaselineEntry { file: "src/main.rs".to_string(), line: 1, rule: "trailing-whitespace".to_string() },
-        ];
+        let baseline = vec![BaselineEntry {
+            file: "src/main.rs".to_string(),
+            line: 1,
+            rule: "trailing-whitespace".to_string(),
+        }];
 
         filter_baseline(&mut results, &baseline);
         assert_eq!(results[0].messages.len(), 1);
@@ -2411,17 +2976,24 @@ enabled_rules = ["line-length", "no-todo"]
 
     #[test]
     fn test_filter_baseline_leaves_unknown_violations() {
-        let mut results = vec![
-            lint::LintResult::new(PathBuf::from("src/main.rs"), "let x = 5;\n".to_string()),
-        ];
+        let mut results = vec![lint::LintResult::new(
+            PathBuf::from("src/main.rs"),
+            "let x = 5;\n".to_string(),
+        )];
         results[0].add_message(lint::LintMessage::new(
-            1, 1, lint::Severity::Warning, "Trailing whitespace".to_string(),
-            "trailing-whitespace".to_string(), None,
+            1,
+            1,
+            lint::Severity::Warning,
+            "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(),
+            None,
         ));
 
-        let baseline = vec![
-            BaselineEntry { file: "src/other.rs".to_string(), line: 1, rule: "trailing-whitespace".to_string() },
-        ];
+        let baseline = vec![BaselineEntry {
+            file: "src/other.rs".to_string(),
+            line: 1,
+            rule: "trailing-whitespace".to_string(),
+        }];
 
         filter_baseline(&mut results, &baseline);
         assert_eq!(results[0].messages.len(), 1);
@@ -2511,8 +3083,14 @@ enabled_rules = ["line-length", "no-todo"]
         let linter = lint::Linter::new(&config);
         let results = linter.run().unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].file_path.file_stem(), Some(std::ffi::OsStr::new("test")));
-        assert_eq!(results[0].file_path.extension(), Some(std::ffi::OsStr::new("rs")));
+        assert_eq!(
+            results[0].file_path.file_stem(),
+            Some(std::ffi::OsStr::new("test"))
+        );
+        assert_eq!(
+            results[0].file_path.extension(),
+            Some(std::ffi::OsStr::new("rs"))
+        );
     }
 
     #[test]
@@ -2521,6 +3099,17 @@ enabled_rules = ["line-length", "no-todo"]
         match cli.command {
             Commands::Lint { verbose, .. } => {
                 assert!(verbose);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_progress_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--progress"]);
+        match cli.command {
+            Commands::Lint { progress, .. } => {
+                assert!(progress);
             }
             _ => panic!("Expected Lint command"),
         }
@@ -2539,12 +3128,17 @@ enabled_rules = ["line-length", "no-todo"]
 
     #[test]
     fn test_unsafe_fixes_filtering() {
-        let mut results = vec![
-            lint::LintResult::new(PathBuf::from("test.rs"), "let x = 5;   \n".to_string()),
-        ];
+        let mut results = vec![lint::LintResult::new(
+            PathBuf::from("test.rs"),
+            "let x = 5;   \n".to_string(),
+        )];
         let mut msg = lint::LintMessage::new(
-            1, 1, lint::Severity::Warning, "Trailing whitespace".to_string(),
-            "trailing-whitespace".to_string(), None,
+            1,
+            1,
+            lint::Severity::Warning,
+            "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(),
+            None,
         );
         msg.fix = Some(lint::output::Fix {
             line: 1,
@@ -2557,9 +3151,10 @@ enabled_rules = ["line-length", "no-todo"]
         for result in &mut results {
             for msg in &mut result.messages {
                 if let Some(ref fix) = msg.fix
-                    && !fix.is_safe {
-                        msg.fix = None;
-                    }
+                    && !fix.is_safe
+                {
+                    msg.fix = None;
+                }
             }
         }
 
@@ -2570,7 +3165,9 @@ enabled_rules = ["line-length", "no-todo"]
     fn test_cli_line_length_alias_parsing() {
         let cli = Cli::parse_from(["lint", "lint", "src/", "--line-length", "120"]);
         match cli.command {
-            Commands::Lint { max_line_length, .. } => {
+            Commands::Lint {
+                max_line_length, ..
+            } => {
                 assert_eq!(max_line_length, Some(120));
             }
             _ => panic!("Expected Lint command"),
@@ -2579,10 +3176,22 @@ enabled_rules = ["line-length", "no-todo"]
 
     #[test]
     fn test_cli_fixable_parsing() {
-        let cli = Cli::parse_from(["lint", "lint", "src/", "--fixable", "trailing-whitespace,line-length"]);
+        let cli = Cli::parse_from([
+            "lint",
+            "lint",
+            "src/",
+            "--fixable",
+            "trailing-whitespace,line-length",
+        ]);
         match cli.command {
             Commands::Lint { fixable, .. } => {
-                assert_eq!(fixable, Some(vec!["trailing-whitespace".to_string(), "line-length".to_string()]));
+                assert_eq!(
+                    fixable,
+                    Some(vec![
+                        "trailing-whitespace".to_string(),
+                        "line-length".to_string()
+                    ])
+                );
             }
             _ => panic!("Expected Lint command"),
         }
@@ -2601,12 +3210,17 @@ enabled_rules = ["line-length", "no-todo"]
 
     #[test]
     fn test_fixable_filters_fixes() {
-        let mut results = vec![
-            lint::LintResult::new(PathBuf::from("test.rs"), "let x = 5;   \n".to_string()),
-        ];
+        let mut results = vec![lint::LintResult::new(
+            PathBuf::from("test.rs"),
+            "let x = 5;   \n".to_string(),
+        )];
         let mut msg = lint::LintMessage::new(
-            1, 1, lint::Severity::Warning, "Trailing whitespace".to_string(),
-            "trailing-whitespace".to_string(), None,
+            1,
+            1,
+            lint::Severity::Warning,
+            "Trailing whitespace".to_string(),
+            "trailing-whitespace".to_string(),
+            None,
         );
         msg.fix = Some(lint::output::Fix {
             line: 1,
@@ -2615,13 +3229,15 @@ enabled_rules = ["line-length", "no-todo"]
         });
         results[0].add_message(msg);
 
-        let allowed: std::collections::HashSet<String> = ["line-length".to_string()].into_iter().collect();
+        let allowed: std::collections::HashSet<String> =
+            ["line-length".to_string()].into_iter().collect();
         for result in &mut results {
             for msg in &mut result.messages {
                 if let Some(ref _fix) = msg.fix
-                    && !allowed.contains(&msg.rule) {
-                        msg.fix = None;
-                    }
+                    && !allowed.contains(&msg.rule)
+                {
+                    msg.fix = None;
+                }
             }
         }
 
@@ -2682,8 +3298,521 @@ enabled_rules = ["line-length", "no-todo"]
         let results = linter.run()?;
 
         let ignored_result = results.iter().find(|r| r.file_path.ends_with("ignored.rs"));
-        assert!(ignored_result.is_some(), "ignored.rs should be linted when --no-gitignore is used");
+        assert!(
+            ignored_result.is_some(),
+            "ignored.rs should be linted when --no-gitignore is used"
+        );
         assert!(!ignored_result.unwrap().messages.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn test_cli_changed_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--changed"]);
+        match cli.command {
+            Commands::Lint { changed, .. } => {
+                assert!(changed);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_staged_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--staged"]);
+        match cli.command {
+            Commands::Lint { staged, .. } => {
+                assert!(staged);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_git_changed_files_returns_changed() -> anyhow::Result<()> {
+        let _guard = CURRENT_DIR_MUTEX.lock().unwrap();
+        if !git_available() {
+            return Ok(());
+        }
+        let temp_dir = tempfile::tempdir()?;
+        let repo_path = temp_dir.path();
+
+        // init git repo
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .output()?;
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo_path)
+            .output()?;
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo_path)
+            .output()?;
+
+        let file = repo_path.join("test.rs");
+        std::fs::write(&file, "let x = 5;\n")?;
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()?;
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo_path)
+            .output()?;
+
+        // modify file
+        std::fs::write(&file, "let x = 5;   \n")?;
+
+        let original_dir = std::env::current_dir()?;
+        std::env::set_current_dir(repo_path)?;
+        let files = git_changed_files(true, false)?;
+        std::env::set_current_dir(original_dir)?;
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], PathBuf::from("test.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_git_changed_files_returns_staged() -> anyhow::Result<()> {
+        let _guard = CURRENT_DIR_MUTEX.lock().unwrap();
+        if !git_available() {
+            return Ok(());
+        }
+        let temp_dir = tempfile::tempdir()?;
+        let repo_path = temp_dir.path();
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .output()?;
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo_path)
+            .output()?;
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo_path)
+            .output()?;
+
+        let file = repo_path.join("test.rs");
+        std::fs::write(&file, "let x = 5;\n")?;
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()?;
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo_path)
+            .output()?;
+
+        // modify and stage
+        std::fs::write(&file, "let x = 5;   \n")?;
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()?;
+
+        let original_dir = std::env::current_dir()?;
+        std::env::set_current_dir(repo_path)?;
+        let files = git_changed_files(false, true)?;
+        std::env::set_current_dir(original_dir)?;
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], PathBuf::from("test.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_git_changed_files_empty_when_clean() -> anyhow::Result<()> {
+        let _guard = CURRENT_DIR_MUTEX.lock().unwrap();
+        if !git_available() {
+            return Ok(());
+        }
+        let temp_dir = tempfile::tempdir()?;
+        let repo_path = temp_dir.path();
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .output()?;
+
+        let original_dir = std::env::current_dir()?;
+        std::env::set_current_dir(repo_path)?;
+        let files = git_changed_files(true, false)?;
+        std::env::set_current_dir(original_dir)?;
+
+        assert!(files.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_cli_plugin_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--plugin", "security"]);
+        match cli.command {
+            Commands::Lint { plugin, .. } => {
+                assert_eq!(plugin, Some(vec!["security".to_string()]));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_multiple_plugins_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--plugin", "security,javascript"]);
+        match cli.command {
+            Commands::Lint { plugin, .. } => {
+                assert_eq!(
+                    plugin,
+                    Some(vec!["security".to_string(), "javascript".to_string()])
+                );
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_plugin_security_adds_rules() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("test.js");
+        std::fs::write(&file_path, "eval(userInput);\n").unwrap();
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file_path.clone()])
+            .plugins(vec!["security".to_string()])
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run().unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].messages.iter().any(|m| m.rule == "unsafe-eval"));
+    }
+
+    #[test]
+    fn test_plugin_javascript_filters_language_rules() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let js_file = temp_dir.path().join("test.js");
+        let py_file = temp_dir.path().join("test.py");
+        std::fs::write(&js_file, "console.log('hello');\n").unwrap();
+        std::fs::write(&py_file, "print('hello')\n").unwrap();
+
+        let config = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().to_path_buf()])
+            .plugins(vec!["javascript".to_string()])
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run().unwrap();
+
+        let js_result = results.iter().find(|r| r.file_path.ends_with("test.js"));
+        let py_result = results.iter().find(|r| r.file_path.ends_with("test.py"));
+
+        assert!(js_result.is_some());
+        assert!(py_result.is_some());
+
+        // JS should have console-log rule
+        assert!(
+            js_result
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.rule == "no-console-log")
+        );
+        // Python should NOT have print rule because only javascript plugin is enabled
+        assert!(
+            !py_result
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.rule == "no-print")
+        );
+    }
+
+    #[test]
+    fn test_no_plugin_runs_all_language_rules() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let js_file = temp_dir.path().join("test.js");
+        let py_file = temp_dir.path().join("test.py");
+        std::fs::write(&js_file, "console.log('hello');\n").unwrap();
+        std::fs::write(&py_file, "print('hello')\n").unwrap();
+
+        let config = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().to_path_buf()])
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run().unwrap();
+
+        let js_result = results.iter().find(|r| r.file_path.ends_with("test.js"));
+        let py_result = results.iter().find(|r| r.file_path.ends_with("test.py"));
+
+        assert!(js_result.is_some());
+        assert!(py_result.is_some());
+        assert!(
+            js_result
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.rule == "no-console-log")
+        );
+        assert!(
+            py_result
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.rule == "no-print")
+        );
+    }
+
+    #[test]
+    fn test_cli_select_category_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--select", "style"]);
+        match cli.command {
+            Commands::Lint { select, .. } => {
+                assert_eq!(select, Some(vec!["style".to_string()]));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_ignore_category_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--ignore", "security"]);
+        match cli.command {
+            Commands::Lint { ignore, .. } => {
+                assert_eq!(ignore, Some(vec!["security".to_string()]));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_select_all_value_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--select", "ALL"]);
+        match cli.command {
+            Commands::Lint { select, .. } => {
+                assert_eq!(select, Some(vec!["ALL".to_string()]));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_select_category_expands_to_rules() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file = temp_dir.path().join("test.rs");
+        std::fs::write(&file, "let x = 5;\n\n\nlet y = 6;\n").unwrap();
+
+        // Default rules don't include no-consecutive-empty-lines
+        let config = ConfigBuilder::new()
+            .paths(vec![file.clone()])
+            .enabled_rules(vec!["line-length".to_string()])
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run().unwrap();
+        let msgs = &results[0].messages;
+        // Only line-length is enabled by default in this config
+        assert!(!msgs.iter().any(|m| m.rule == "no-consecutive-empty-lines"));
+
+        // Now use --select style to add all style rules
+        let config2 = ConfigBuilder::new()
+            .paths(vec![file])
+            .enabled_rules(vec!["line-length".to_string()])
+            .build();
+        // Simulate what main() does: expand categories
+        let expanded = expand_rule_names(vec!["style".to_string()]);
+        let mut enabled = config2.rule_set.enabled_rules.clone();
+        for rule in expanded {
+            if !enabled.contains(&rule) {
+                enabled.push(rule);
+            }
+        }
+        let config2 = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().join("test.rs")])
+            .enabled_rules(enabled)
+            .build();
+
+        let linter2 = lint::Linter::new(&config2);
+        let results2 = linter2.run().unwrap();
+        let msgs2 = &results2[0].messages;
+        assert!(msgs2.iter().any(|m| m.rule == "no-consecutive-empty-lines"));
+    }
+
+    #[test]
+    fn test_ignore_category_removes_rules() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file = temp_dir.path().join("test.rs");
+        std::fs::write(&file, "password = 'secret'\n").unwrap();
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.clone()])
+            .enabled_rules(vec!["hardcoded-secret".to_string()])
+            .build();
+
+        let linter = lint::Linter::new(&config);
+        let results = linter.run().unwrap();
+        assert!(
+            results[0]
+                .messages
+                .iter()
+                .any(|m| m.rule == "hardcoded-secret")
+        );
+
+        // Now ignore the security category
+        let config2 = ConfigBuilder::new()
+            .paths(vec![file])
+            .enabled_rules(vec!["hardcoded-secret".to_string()])
+            .build();
+        let expanded_ignore = expand_rule_names(vec!["security".to_string()]);
+        let mut enabled = config2.rule_set.enabled_rules.clone();
+        enabled.retain(|r| !expanded_ignore.contains(r));
+        let config2 = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().join("test.rs")])
+            .enabled_rules(enabled)
+            .build();
+
+        let linter2 = lint::Linter::new(&config2);
+        let results2 = linter2.run().unwrap();
+        assert!(
+            !results2[0]
+                .messages
+                .iter()
+                .any(|m| m.rule == "hardcoded-secret")
+        );
+    }
+
+    #[test]
+    fn test_select_all_expands_to_every_rule() {
+        let expanded = expand_rule_names(vec!["ALL".to_string()]);
+        let all_generic = lint::rules::known_rules();
+        let all_lang = lint::language_rules::LanguageRuleSet::known_rules();
+
+        // Should include every generic rule
+        for rule in &all_generic {
+            assert!(
+                expanded.contains(rule),
+                "ALL should include generic rule: {}",
+                rule
+            );
+        }
+
+        // Should include every language rule
+        for rule in &all_lang {
+            assert!(
+                expanded.contains(rule),
+                "ALL should include language rule: {}",
+                rule
+            );
+        }
+
+        // Should not have duplicates
+        let unique: std::collections::HashSet<_> = expanded.iter().collect();
+        assert_eq!(
+            unique.len(),
+            expanded.len(),
+            "ALL expansion should have no duplicates"
+        );
+    }
+
+    #[test]
+    fn test_validate_config_valid() {
+        let config = ConfigBuilder::new()
+            .enabled_rules(vec!["line-length".to_string(), "no-todo".to_string()])
+            .plugins(vec!["security".to_string()])
+            .build();
+        let errors = validate_config_errors(&config);
+        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn test_validate_config_unknown_rule() {
+        let config = ConfigBuilder::new()
+            .enabled_rules(vec!["not-a-real-rule".to_string()])
+            .build();
+        let errors = validate_config_errors(&config);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("not-a-real-rule"));
+    }
+
+    #[test]
+    fn test_validate_config_unknown_plugin() {
+        let config = ConfigBuilder::new()
+            .plugins(vec!["not-a-plugin".to_string()])
+            .build();
+        let errors = validate_config_errors(&config);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("not-a-plugin"));
+    }
+
+    #[test]
+    fn test_validate_config_unknown_severity_rule() {
+        let mut config = ConfigBuilder::new().build();
+        config
+            .severity_overrides
+            .insert("fake-rule".to_string(), lint::output::Severity::Error);
+        let errors = validate_config_errors(&config);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("fake-rule"));
+    }
+
+    #[test]
+    fn test_cli_validate_config_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--validate-config"]);
+        match cli.command {
+            Commands::Lint {
+                validate_config, ..
+            } => {
+                assert!(validate_config);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_max_nesting_depth_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--max-nesting-depth", "5"]);
+        match cli.command {
+            Commands::Lint {
+                max_nesting_depth, ..
+            } => {
+                assert_eq!(max_nesting_depth, Some(5));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_max_function_lines_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--max-function-lines", "30"]);
+        match cli.command {
+            Commands::Lint {
+                max_function_lines, ..
+            } => {
+                assert_eq!(max_function_lines, Some(30));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_expand_rule_names_resolves_codes() {
+        let expanded = expand_rule_names(vec!["W001".to_string()]);
+        assert!(expanded.contains(&"line-length".to_string()));
+    }
+
+    #[test]
+    fn test_validate_config_accepts_rule_codes() {
+        let config = ConfigBuilder::new()
+            .enabled_rules(vec!["W001".to_string(), "E001".to_string()])
+            .build();
+        let errors = validate_config_errors(&config);
+        assert!(
+            errors.is_empty(),
+            "Expected no errors for valid codes, got: {:?}",
+            errors
+        );
     }
 }

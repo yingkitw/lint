@@ -2,16 +2,120 @@ use crate::output::{LintMessage, Severity};
 use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::LazyLock;
 
 pub trait Rule: Send + Sync {
     fn name(&self) -> &str;
+    fn code(&self) -> &str {
+        code_from_name(self.name())
+    }
     fn category(&self) -> &str {
         "style"
     }
     fn description(&self) -> &str {
         ""
     }
+    fn has_fix(&self) -> bool {
+        false
+    }
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
+}
+
+/// Maps a built-in rule name to its short letter-number code.
+/// Returns the name itself as a fallback for unknown/custom rules.
+pub fn code_from_name(name: &str) -> &str {
+    match name {
+        "line-length" => "W001",
+        "trailing-whitespace" => "W002",
+        "no-todo" => "W003",
+        "no-empty-file" => "E001",
+        "no-consecutive-empty-lines" => "W004",
+        "no-tabs" => "W005",
+        "final-newline" => "W006",
+        "no-mixed-line-endings" => "W007",
+        "hardcoded-secret" => "S001",
+        "unsafe-eval" => "S002",
+        "sql-injection-risk" => "S003",
+        "max-nesting-depth" => "E002",
+        "max-function-lines" => "E003",
+        "sort-imports" => "W008",
+        // Language-specific
+        "no-console-log" => "L001",
+        "no-var" => "L002",
+        "no-print" => "L003",
+        "python-style" => "L004",
+        "go-style" => "L005",
+        "java-style" => "L006",
+        "no-unwrap" => "L007",
+        "no-expect" => "L008",
+        "missing-semicolon" => "L009",
+        "no-puts" => "L010",
+        "ruby-style" => "L011",
+        "no-echo" => "L012",
+        "no-swift-print" => "L013",
+        "kotlin-style" => "L014",
+        "no-dart-print" => "L015",
+        "no-csharp-console" => "L016",
+        "csharp-style" => "L017",
+        "shell-echo-quote" => "L018",
+        "sql-no-select-star" => "L019",
+        "no-lua-print" => "L020",
+        "no-scala-println" => "L021",
+        "no-r-print" => "L022",
+        "no-zig-debug-print" => "L023",
+        "html-no-inline-style" => "L024",
+        "html-img-alt" => "L025",
+        "css-avoid-important" => "L026",
+        _ => name,
+    }
+}
+
+/// Maps a short letter-number code back to the canonical rule name.
+/// Returns the code itself as a fallback for unknown codes.
+pub fn name_from_code(code: &str) -> &str {
+    match code {
+        "W001" => "line-length",
+        "W002" => "trailing-whitespace",
+        "W003" => "no-todo",
+        "E001" => "no-empty-file",
+        "W004" => "no-consecutive-empty-lines",
+        "W005" => "no-tabs",
+        "W006" => "final-newline",
+        "W007" => "no-mixed-line-endings",
+        "S001" => "hardcoded-secret",
+        "S002" => "unsafe-eval",
+        "S003" => "sql-injection-risk",
+        "E002" => "max-nesting-depth",
+        "E003" => "max-function-lines",
+        "W008" => "sort-imports",
+        "L001" => "no-console-log",
+        "L002" => "no-var",
+        "L003" => "no-print",
+        "L004" => "python-style",
+        "L005" => "go-style",
+        "L006" => "java-style",
+        "L007" => "no-unwrap",
+        "L008" => "no-expect",
+        "L009" => "missing-semicolon",
+        "L010" => "no-puts",
+        "L011" => "ruby-style",
+        "L012" => "no-echo",
+        "L013" => "no-swift-print",
+        "L014" => "kotlin-style",
+        "L015" => "no-dart-print",
+        "L016" => "no-csharp-console",
+        "L017" => "csharp-style",
+        "L018" => "shell-echo-quote",
+        "L019" => "sql-no-select-star",
+        "L020" => "no-lua-print",
+        "L021" => "no-scala-println",
+        "L022" => "no-r-print",
+        "L023" => "no-zig-debug-print",
+        "L024" => "html-no-inline-style",
+        "L025" => "html-img-alt",
+        "L026" => "css-avoid-important",
+        _ => code,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,6 +202,10 @@ impl Rule for LineLengthRule {
         "style"
     }
 
+    fn description(&self) -> &str {
+        "Lines exceeding the configured maximum length."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -131,6 +239,14 @@ impl Rule for TrailingWhitespaceRule {
 
     fn category(&self) -> &str {
         "style"
+    }
+
+    fn description(&self) -> &str {
+        "Trailing whitespace at the end of lines."
+    }
+
+    fn has_fix(&self) -> bool {
+        true
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -210,6 +326,10 @@ impl Rule for NoEmptyFileRule {
         "style"
     }
 
+    fn description(&self) -> &str {
+        "Files that are completely empty or contain only whitespace."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
@@ -258,6 +378,14 @@ impl Rule for NoConsecutiveEmptyLinesRule {
 
     fn category(&self) -> &str {
         "style"
+    }
+
+    fn description(&self) -> &str {
+        "More than one consecutive empty line."
+    }
+
+    fn has_fix(&self) -> bool {
+        true
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -309,6 +437,14 @@ impl Rule for NoTabsRule {
         "style"
     }
 
+    fn description(&self) -> &str {
+        "Tab characters used for indentation. Use spaces instead."
+    }
+
+    fn has_fix(&self) -> bool {
+        true
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -345,20 +481,30 @@ impl Rule for FinalNewlineRule {
         "style"
     }
 
+    fn description(&self) -> &str {
+        "Files that do not end with a newline character."
+    }
+
+    fn has_fix(&self) -> bool {
+        true
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         if content.is_empty() {
             return Vec::new();
         }
         if !content.ends_with('\n') {
-            vec![LintMessage::new(
-                content.lines().count().max(1),
-                1,
-                Severity::Warning,
-                "File does not end with a newline".to_string(),
-                self.name().to_string(),
-                Some("Add a final newline at the end of the file.".to_string()),
-            )
-            .with_fix("\n".to_string())]
+            vec![
+                LintMessage::new(
+                    content.lines().count().max(1),
+                    1,
+                    Severity::Warning,
+                    "File does not end with a newline".to_string(),
+                    self.name().to_string(),
+                    Some("Add a final newline at the end of the file.".to_string()),
+                )
+                .with_fix("\n".to_string()),
+            ]
         } else {
             Vec::new()
         }
@@ -375,6 +521,14 @@ impl Rule for NoMixedLineEndingsRule {
 
     fn category(&self) -> &str {
         "style"
+    }
+
+    fn description(&self) -> &str {
+        "Mixed CRLF and LF line endings in the same file."
+    }
+
+    fn has_fix(&self) -> bool {
+        true
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -413,6 +567,438 @@ impl Rule for NoMixedLineEndingsRule {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MaxNestingDepthRule {
+    pub max_depth: usize,
+}
+
+impl Rule for MaxNestingDepthRule {
+    fn name(&self) -> &str {
+        "max-nesting-depth"
+    }
+
+    fn category(&self) -> &str {
+        "correctness"
+    }
+
+    fn description(&self) -> &str {
+        "Code blocks nested deeper than the configured maximum depth."
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let mut messages = Vec::new();
+        let mut depth: isize = 0;
+        for (line_idx, line) in content.lines().enumerate() {
+            let line_num = line_idx + 1;
+            // Count brace closings before measuring depth for this line
+            let closings = line.chars().filter(|c| *c == '}').count() as isize;
+            depth -= closings;
+            if depth < 0 {
+                depth = 0;
+            }
+            if depth > self.max_depth as isize {
+                messages.push(LintMessage::new(
+                    line_num,
+                    1,
+                    Severity::Warning,
+                    format!(
+                        "Nesting depth of {} exceeds maximum {}",
+                        depth, self.max_depth
+                    ),
+                    self.name().to_string(),
+                    Some(
+                        "Refactor to reduce nesting: extract into functions or use early returns."
+                            .to_string(),
+                    ),
+                ));
+            }
+            // Count brace openings after measuring depth for this line
+            let openings = line.chars().filter(|c| *c == '{').count() as isize;
+            depth += openings;
+        }
+        messages
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MaxFunctionLinesRule {
+    pub max_lines: usize,
+}
+
+impl Rule for MaxFunctionLinesRule {
+    fn name(&self) -> &str {
+        "max-function-lines"
+    }
+
+    fn category(&self) -> &str {
+        "correctness"
+    }
+
+    fn description(&self) -> &str {
+        "Functions that exceed the configured maximum line count."
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let mut messages = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            // Detect function definitions across common languages
+            // Pattern: function name(...), fn name(...), def name(...), etc.
+            let is_func_start = line.trim().starts_with("fn ")
+                || line.trim().starts_with("function ")
+                || line.trim().starts_with("def ")
+                || line.trim().starts_with("func ")
+                || (line.contains("(")
+                    && line.contains(")")
+                    && line.contains("{")
+                    && !line.trim().starts_with("if")
+                    && !line.trim().starts_with("for")
+                    && !line.trim().starts_with("while")
+                    && !line.trim().starts_with("switch")
+                    && !line.trim().starts_with("match"));
+            if is_func_start {
+                let start_line = i + 1;
+                let mut brace_depth: isize = 0;
+                let mut started = false;
+                let mut end_line = i;
+                for (j, l) in lines.iter().enumerate().skip(i) {
+                    for c in l.chars() {
+                        if c == '{' {
+                            brace_depth += 1;
+                            started = true;
+                        } else if c == '}' {
+                            brace_depth -= 1;
+                        }
+                    }
+                    end_line = j;
+                    if started && brace_depth <= 0 {
+                        break;
+                    }
+                }
+                let func_len = end_line - i + 1;
+                if func_len > self.max_lines {
+                    messages.push(LintMessage::new(
+                        start_line,
+                        1,
+                        Severity::Warning,
+                        format!(
+                            "Function spans {} lines, exceeding maximum {}",
+                            func_len, self.max_lines
+                        ),
+                        self.name().to_string(),
+                        Some(
+                            "Refactor: extract helper functions to reduce complexity.".to_string(),
+                        ),
+                    ));
+                }
+                i = end_line + 1;
+            } else {
+                i += 1;
+            }
+        }
+        messages
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SortImportsRule;
+
+impl Rule for SortImportsRule {
+    fn name(&self) -> &str {
+        "sort-imports"
+    }
+
+    fn category(&self) -> &str {
+        "style"
+    }
+
+    fn description(&self) -> &str {
+        "Import/use statements that are not in alphabetical order."
+    }
+
+    fn has_fix(&self) -> bool {
+        true
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let mut messages = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            if Self::is_import_line(lines[i]) {
+                // Find consecutive import block
+                let start = i;
+                while i < lines.len() && Self::is_import_line(lines[i]) {
+                    i += 1;
+                }
+                let end = i;
+                // Check if block has 2+ lines and is sorted
+                if end - start >= 2 {
+                    let mut prev_key = String::new();
+                    for (j, line) in lines.iter().enumerate().take(end).skip(start) {
+                        let key = Self::extract_sort_key(line);
+                        if !prev_key.is_empty() && key < prev_key {
+                            messages.push(LintMessage::new(
+                                j + 1,
+                                1,
+                                Severity::Info,
+                                format!(
+                                    "Import '{}' is out of alphabetical order (should come before '{}')",
+                                    key, prev_key
+                                ),
+                                self.name().to_string(),
+                                Some("Reorder imports alphabetically for consistency.".to_string()),
+                            ));
+                        }
+                        prev_key = key;
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        // If there are violations, attach a full-file fix to the first message
+        if !messages.is_empty() {
+            let fixed = Self::sort_all_imports(content);
+            messages[0].fix = Some(crate::output::Fix {
+                line: 0,
+                replacement: fixed,
+                is_safe: true,
+            });
+        }
+
+        messages
+    }
+}
+
+impl SortImportsRule {
+    fn is_import_line(line: &str) -> bool {
+        let trimmed = line.trim();
+        trimmed.starts_with("use ")
+            || trimmed.starts_with("import ")
+            || trimmed.starts_with("from ")
+            || trimmed.starts_with("#include ")
+            || trimmed.contains("require(")
+    }
+
+    fn extract_sort_key(line: &str) -> String {
+        let trimmed = line.trim();
+        if let Some(after) = trimmed.strip_prefix("from ") {
+            // Python: from os import path → key: "os"
+            if let Some(pos) = after.find(" import") {
+                return after[..pos].trim().to_lowercase();
+            }
+        }
+        if let Some(after) = trimmed.strip_prefix("use ") {
+            // Rust: use std::fs; → key: "std::fs"
+            return after.trim_end_matches(';').trim().to_lowercase();
+        }
+        if let Some(after) = trimmed.strip_prefix("import ") {
+            // JS: import { foo } from 'bar'; → key: "bar" (from clause)
+            if let Some(from_pos) = trimmed.rfind(" from ") {
+                let after_from = &trimmed[from_pos + 6..];
+                let cleaned = after_from.trim().trim_end_matches(';');
+                return cleaned
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_lowercase();
+            }
+            // Python: import os, sys → key: "os"
+            return after
+                .split(',')
+                .next()
+                .unwrap_or(after)
+                .trim()
+                .to_lowercase();
+        }
+        if let Some(after) = trimmed.strip_prefix("#include ") {
+            return after.trim().to_lowercase();
+        }
+        if let Some(pos) = trimmed.find("require(") {
+            let after = &trimmed[pos + 8..];
+            if let Some(end) = after.find(')') {
+                let inner = &after[..end];
+                return inner.trim_matches(|c| c == '\'' || c == '"').to_lowercase();
+            }
+        }
+        trimmed.to_lowercase()
+    }
+
+    /// Returns a copy of `content` with every import block sorted alphabetically.
+    fn sort_all_imports(content: &str) -> String {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if Self::is_import_line(lines[i]) {
+                let start = i;
+                while i < lines.len() && Self::is_import_line(lines[i]) {
+                    i += 1;
+                }
+                let end = i;
+                if end - start >= 2 {
+                    let mut block: Vec<(&str, String)> = lines[start..end]
+                        .iter()
+                        .map(|&l| (l, Self::extract_sort_key(l)))
+                        .collect();
+                    block.sort_by(|a, b| a.1.cmp(&b.1));
+                    for (line, _) in block {
+                        result.push(line);
+                    }
+                } else {
+                    result.extend(&lines[start..end]);
+                }
+            } else {
+                result.push(lines[i]);
+                i += 1;
+            }
+        }
+        let mut output = result.join("\n");
+        if content.ends_with('\n') || content.ends_with("\r\n") {
+            output.push('\n');
+        }
+        output
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HardcodedSecretRule;
+
+static SECRET_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r##"(?i)(password|passwd|secret|api_key|apikey|token|auth)\s*[=:]\s*['"][^'"]+['"]"##,
+    )
+    .unwrap()
+});
+
+impl Rule for HardcodedSecretRule {
+    fn name(&self) -> &str {
+        "hardcoded-secret"
+    }
+
+    fn category(&self) -> &str {
+        "security"
+    }
+
+    fn description(&self) -> &str {
+        "Detects hardcoded credentials such as passwords, API keys, and tokens in source code."
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let mut messages = Vec::new();
+        let pattern = &*SECRET_PATTERN;
+        for (line_num, line) in content.lines().enumerate() {
+            if pattern.is_match(line) {
+                let col = line
+                    .to_lowercase()
+                    .find("password")
+                    .or_else(|| line.to_lowercase().find("secret"))
+                    .or_else(|| line.to_lowercase().find("api_key"))
+                    .or_else(|| line.to_lowercase().find("apikey"))
+                    .or_else(|| line.to_lowercase().find("token"))
+                    .or_else(|| line.to_lowercase().find("auth"))
+                    .unwrap_or(0);
+                messages.push(LintMessage::new(
+                    line_num + 1,
+                    col,
+                    Severity::Error,
+                    "Hardcoded secret detected".to_string(),
+                    self.name().to_string(),
+                    Some("Use environment variables or a secrets manager instead of hardcoding credentials".to_string()),
+                ));
+            }
+        }
+        messages
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnsafeEvalRule;
+
+static EVAL_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\beval\s*\(").unwrap());
+
+impl Rule for UnsafeEvalRule {
+    fn name(&self) -> &str {
+        "unsafe-eval"
+    }
+
+    fn category(&self) -> &str {
+        "security"
+    }
+
+    fn description(&self) -> &str {
+        "Detects unsafe eval() calls which can lead to code injection vulnerabilities."
+    }
+
+    fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage> {
+        let mut messages = Vec::new();
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !matches!(ext, "js" | "ts" | "jsx" | "tsx") {
+            return messages;
+        }
+        let pattern = &*EVAL_PATTERN;
+        for (line_num, line) in content.lines().enumerate() {
+            if pattern.is_match(line) && !line.trim_start().starts_with("//") {
+                messages.push(LintMessage::new(
+                    line_num + 1,
+                    line.find("eval").unwrap_or(0),
+                    Severity::Error,
+                    "Unsafe eval() call detected".to_string(),
+                    self.name().to_string(),
+                    Some("Avoid eval(). Use JSON.parse for JSON data, or structured parsing for other formats".to_string()),
+                ));
+            }
+        }
+        messages
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqlInjectionRiskRule;
+
+static SQL_INJECTION_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r##"(?i)(SELECT|INSERT|UPDATE|DELETE).*\+.*\$|['"].*\$\{|['"].*\+.*\+"##).unwrap()
+});
+
+impl Rule for SqlInjectionRiskRule {
+    fn name(&self) -> &str {
+        "sql-injection-risk"
+    }
+
+    fn category(&self) -> &str {
+        "security"
+    }
+
+    fn description(&self) -> &str {
+        "Detects potential SQL injection risks from string concatenation or interpolation in queries."
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let mut messages = Vec::new();
+        let pattern = &*SQL_INJECTION_PATTERN;
+        for (line_num, line) in content.lines().enumerate() {
+            if pattern.is_match(line)
+                && !line.trim_start().starts_with("//")
+                && !line.trim_start().starts_with("#")
+                && !line.trim_start().starts_with("--")
+            {
+                messages.push(LintMessage::new(
+                    line_num + 1,
+                    line.to_lowercase().find("select").or_else(|| line.to_lowercase().find("insert")).or_else(|| line.to_lowercase().find("update")).or_else(|| line.to_lowercase().find("delete")).unwrap_or(0),
+                    Severity::Error,
+                    "Potential SQL injection risk from string concatenation".to_string(),
+                    self.name().to_string(),
+                    Some("Use parameterized queries or prepared statements instead of string concatenation".to_string()),
+                ));
+            }
+        }
+        messages
+    }
+}
+
 pub struct RuleSet {
     pub rules: Vec<Box<dyn Rule>>,
 }
@@ -436,6 +1022,149 @@ impl Default for RuleSet {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Returns the list of rule names provided by a built-in plugin.
+pub fn plugin_rules(plugin: &str) -> Vec<String> {
+    match plugin {
+        "security" => vec![
+            "hardcoded-secret".to_string(),
+            "unsafe-eval".to_string(),
+            "sql-injection-risk".to_string(),
+        ],
+        "javascript" => vec![
+            "no-console-log".to_string(),
+            "no-var".to_string(),
+            "missing-semicolon".to_string(),
+        ],
+        "python" => vec!["no-print".to_string(), "python-style".to_string()],
+        "rust" => vec![
+            "no-unwrap".to_string(),
+            "no-expect".to_string(),
+            "missing-semicolon".to_string(),
+        ],
+        "html" => vec![
+            "html-no-inline-style".to_string(),
+            "html-img-alt".to_string(),
+        ],
+        "css" => vec!["css-avoid-important".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// Returns all rule names belonging to a built-in category.
+pub fn category_rules(category: &str) -> Vec<String> {
+    match category {
+        "style" => vec![
+            "line-length".to_string(),
+            "trailing-whitespace".to_string(),
+            "final-newline".to_string(),
+            "no-mixed-line-endings".to_string(),
+            "no-tabs".to_string(),
+            "no-consecutive-empty-lines".to_string(),
+            "python-style".to_string(),
+            "go-style".to_string(),
+            "java-style".to_string(),
+            "kotlin-style".to_string(),
+            "ruby-style".to_string(),
+            "csharp-style".to_string(),
+            "missing-semicolon".to_string(),
+            "html-no-inline-style".to_string(),
+            "css-avoid-important".to_string(),
+        ],
+        "correctness" => vec![
+            "no-todo".to_string(),
+            "no-empty-file".to_string(),
+            "no-console-log".to_string(),
+            "no-var".to_string(),
+            "no-print".to_string(),
+            "no-unwrap".to_string(),
+            "no-expect".to_string(),
+            "no-puts".to_string(),
+            "no-echo".to_string(),
+            "no-swift-print".to_string(),
+            "no-dart-print".to_string(),
+            "no-csharp-console".to_string(),
+            "no-lua-print".to_string(),
+            "no-scala-println".to_string(),
+            "no-r-print".to_string(),
+            "no-zig-debug-print".to_string(),
+            "sql-no-select-star".to_string(),
+            "html-img-alt".to_string(),
+            "shell-echo-quote".to_string(),
+        ],
+        "security" => vec![
+            "hardcoded-secret".to_string(),
+            "unsafe-eval".to_string(),
+            "sql-injection-risk".to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Returns true if `name` is a known rule category.
+pub fn is_category(name: &str) -> bool {
+    matches!(name, "style" | "correctness" | "security")
+}
+
+/// Returns all built-in rule names (generic + language).
+pub fn known_rules() -> Vec<String> {
+    vec![
+        // Generic
+        "line-length".to_string(),
+        "trailing-whitespace".to_string(),
+        "no-todo".to_string(),
+        "no-empty-file".to_string(),
+        "no-consecutive-empty-lines".to_string(),
+        "no-tabs".to_string(),
+        "final-newline".to_string(),
+        "no-mixed-line-endings".to_string(),
+        "hardcoded-secret".to_string(),
+        "unsafe-eval".to_string(),
+        "sql-injection-risk".to_string(),
+        "max-nesting-depth".to_string(),
+        "max-function-lines".to_string(),
+        "sort-imports".to_string(),
+        // Language
+        "no-console-log".to_string(),
+        "no-var".to_string(),
+        "no-print".to_string(),
+        "python-style".to_string(),
+        "go-style".to_string(),
+        "java-style".to_string(),
+        "no-unwrap".to_string(),
+        "no-expect".to_string(),
+        "missing-semicolon".to_string(),
+        "no-puts".to_string(),
+        "ruby-style".to_string(),
+        "no-echo".to_string(),
+        "no-swift-print".to_string(),
+        "kotlin-style".to_string(),
+        "no-dart-print".to_string(),
+        "no-csharp-console".to_string(),
+        "csharp-style".to_string(),
+        "shell-echo-quote".to_string(),
+        "sql-no-select-star".to_string(),
+        "no-lua-print".to_string(),
+        "no-scala-println".to_string(),
+        "no-r-print".to_string(),
+        "no-zig-debug-print".to_string(),
+        "html-no-inline-style".to_string(),
+        "html-img-alt".to_string(),
+        "css-avoid-important".to_string(),
+    ]
+}
+
+/// Returns all built-in plugin names.
+pub fn known_plugins() -> Vec<String> {
+    vec![
+        "security".to_string(),
+        "javascript".to_string(),
+        "python".to_string(),
+        "rust".to_string(),
+        "html".to_string(),
+        "css".to_string(),
+    ]
 }
 
 #[cfg(test)]
@@ -618,7 +1347,11 @@ mod tests {
         for len in 1..=100 {
             let line = "x".repeat(len);
             let messages = rule.check(&line, Path::new("test.rs"));
-            assert!(messages.is_empty(), "Line of length {} should not be flagged", len);
+            assert!(
+                messages.is_empty(),
+                "Line of length {} should not be flagged",
+                len
+            );
         }
     }
 
@@ -634,7 +1367,11 @@ mod tests {
         ];
         for line in clean_lines {
             let messages = rule.check(line, Path::new("test.rs"));
-            assert!(messages.is_empty(), "Clean line should not be flagged: {}", line);
+            assert!(
+                messages.is_empty(),
+                "Clean line should not be flagged: {}",
+                line
+            );
         }
     }
 
@@ -649,17 +1386,19 @@ mod tests {
         ];
         for content in clean_contents {
             let messages = rule.check(content, Path::new("test.rs"));
-            assert!(messages.is_empty(), "Clean content should not be flagged: {}", content);
+            assert!(
+                messages.is_empty(),
+                "Clean content should not be flagged: {}",
+                content
+            );
         }
     }
 
     #[test]
     fn test_property_fix_never_increases_file_size() {
         let content = "line one   \nline two\t\nline three\n";
-        let mut result = crate::output::LintResult::new(
-            PathBuf::from("test.rs"),
-            content.to_string(),
-        );
+        let mut result =
+            crate::output::LintResult::new(PathBuf::from("test.rs"), content.to_string());
         let rule = TrailingWhitespaceRule;
         for msg in rule.check(content, Path::new("test.rs")) {
             result.add_message(msg);
@@ -737,7 +1476,10 @@ mod tests {
         assert_eq!(messages[0].line, 1);
         assert_eq!(messages[0].column, 1);
         assert!(messages[0].fix.is_some());
-        assert_eq!(messages[0].fix.as_ref().unwrap().replacement, "    let x = 5;");
+        assert_eq!(
+            messages[0].fix.as_ref().unwrap().replacement,
+            "    let x = 5;"
+        );
     }
 
     #[test]
@@ -746,7 +1488,10 @@ mod tests {
         let content = "\t\tlet x = 5;";
         let messages = rule.check(content, Path::new("test.rs"));
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].fix.as_ref().unwrap().replacement, "        let x = 5;");
+        assert_eq!(
+            messages[0].fix.as_ref().unwrap().replacement,
+            "        let x = 5;"
+        );
     }
 
     #[test]
@@ -828,5 +1573,357 @@ mod tests {
         }
         assert!(result.apply_fixes());
         assert_eq!(result.file_content, "line one\n\nline two\n");
+    }
+
+    #[test]
+    fn test_hardcoded_secret_rule_detects_password() {
+        let rule = HardcodedSecretRule;
+        let messages = rule.check("password = 'secret123'", Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.contains("Hardcoded secret"));
+        assert_eq!(messages[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn test_hardcoded_secret_rule_detects_api_key() {
+        let rule = HardcodedSecretRule;
+        let messages = rule.check("api_key = \"abc123\"", Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn test_hardcoded_secret_rule_clean() {
+        let rule = HardcodedSecretRule;
+        let messages = rule.check("let x = 5;", Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_unsafe_eval_rule_detects_eval() {
+        let rule = UnsafeEvalRule;
+        let messages = rule.check("eval(userInput);", Path::new("test.js"));
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.contains("eval"));
+    }
+
+    #[test]
+    fn test_unsafe_eval_rule_ignores_non_js() {
+        let rule = UnsafeEvalRule;
+        let messages = rule.check("eval(userInput);", Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_unsafe_eval_rule_commented() {
+        let rule = UnsafeEvalRule;
+        let messages = rule.check("// eval(x);", Path::new("test.js"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_sql_injection_risk_rule_detects_concat() {
+        let rule = SqlInjectionRiskRule;
+        let messages = rule.check(
+            "const q = \"SELECT * FROM users WHERE id = '\" + id + \"'\";",
+            Path::new("test.js"),
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.contains("SQL injection"));
+    }
+
+    #[test]
+    fn test_sql_injection_risk_rule_clean() {
+        let rule = SqlInjectionRiskRule;
+        let messages = rule.check("const query = 'SELECT * FROM users';", Path::new("test.js"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_rules_security() {
+        let rules = plugin_rules("security");
+        assert!(rules.contains(&"hardcoded-secret".to_string()));
+        assert!(rules.contains(&"unsafe-eval".to_string()));
+        assert!(rules.contains(&"sql-injection-risk".to_string()));
+    }
+
+    #[test]
+    fn test_plugin_rules_javascript() {
+        let rules = plugin_rules("javascript");
+        assert!(rules.contains(&"no-console-log".to_string()));
+        assert!(rules.contains(&"no-var".to_string()));
+    }
+
+    #[test]
+    fn test_plugin_rules_unknown_returns_empty() {
+        let rules = plugin_rules("nonexistent");
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_category_rules_style() {
+        let rules = category_rules("style");
+        assert!(rules.contains(&"line-length".to_string()));
+        assert!(rules.contains(&"trailing-whitespace".to_string()));
+        assert!(!rules.contains(&"no-todo".to_string()));
+    }
+
+    #[test]
+    fn test_category_rules_security() {
+        let rules = category_rules("security");
+        assert!(rules.contains(&"hardcoded-secret".to_string()));
+        assert!(rules.contains(&"unsafe-eval".to_string()));
+    }
+
+    #[test]
+    fn test_category_rules_unknown_returns_empty() {
+        let rules = category_rules("nonexistent");
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_is_category() {
+        assert!(is_category("style"));
+        assert!(is_category("correctness"));
+        assert!(is_category("security"));
+        assert!(!is_category("line-length"));
+        assert!(!is_category("no-todo"));
+    }
+
+    #[test]
+    fn test_max_nesting_depth_rule() {
+        let rule = MaxNestingDepthRule { max_depth: 3 };
+        let content = r#"fn main() {
+    if true {
+        if true {
+            if true {
+                deeply_nested();
+            }
+        }
+    }
+}
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        // Lines at depth 4 trigger: the 4th nested block start and the body line
+        assert!(!messages.is_empty());
+        assert_eq!(messages[0].rule, "max-nesting-depth");
+        assert!(messages[0].message.contains("depth of 4"));
+    }
+
+    #[test]
+    fn test_max_nesting_depth_rule_within_limit() {
+        let rule = MaxNestingDepthRule { max_depth: 4 };
+        let content = r#"fn main() {
+    if true {
+        if true {
+            if true {
+                ok();
+            }
+        }
+    }
+}
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_max_function_lines_rule() {
+        let rule = MaxFunctionLinesRule { max_lines: 5 };
+        let content = r#"fn long_function() {
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    let d = 4;
+    let e = 5;
+    let f = 6;
+}
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].rule, "max-function-lines");
+        assert!(messages[0].message.contains("8 lines"));
+    }
+
+    #[test]
+    fn test_max_function_lines_rule_within_limit() {
+        let rule = MaxFunctionLinesRule { max_lines: 10 };
+        let content = r#"fn short() {
+    let a = 1;
+}
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_max_function_lines_multiple_functions() {
+        let rule = MaxFunctionLinesRule { max_lines: 3 };
+        let content = r#"fn a() {
+    x();
+}
+fn b() {
+    let x = 1;
+    let y = 2;
+    let z = 3;
+    let w = 4;
+}
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        // Only fn b() exceeds 3 lines
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.contains("Function spans"));
+    }
+
+    #[test]
+    fn test_sort_imports_rust_unsorted() {
+        let rule = SortImportsRule;
+        let content = r#"use std::io;
+use std::fs;
+use std::collections::HashMap;
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert!(!messages.is_empty());
+        assert_eq!(messages[0].rule, "sort-imports");
+        assert!(messages[0].message.contains("std::fs"));
+    }
+
+    #[test]
+    fn test_sort_imports_rust_sorted() {
+        let rule = SortImportsRule;
+        let content = r#"use std::collections::HashMap;
+use std::fs;
+use std::io;
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_sort_imports_python_unsorted() {
+        let rule = SortImportsRule;
+        let content = r#"import os
+import json
+from pathlib import Path
+from collections import OrderedDict
+"#;
+        let messages = rule.check(content, Path::new("test.py"));
+        // json < os, so line 2 should be flagged
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].message.contains("json"));
+    }
+
+    #[test]
+    fn test_sort_imports_js_from_unsorted() {
+        let rule = SortImportsRule;
+        let content = r#"import { foo } from 'lodash';
+import { bar } from 'express';
+import React from 'react';
+"#;
+        let messages = rule.check(content, Path::new("test.js"));
+        // express < lodash
+        assert!(!messages.is_empty());
+        assert!(messages[0].message.contains("express"));
+    }
+
+    #[test]
+    fn test_sort_imports_single_line_noop() {
+        let rule = SortImportsRule;
+        let content = r#"import os
+"#;
+        let messages = rule.check(content, Path::new("test.py"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_sort_imports_fix_reorders_block() {
+        let rule = SortImportsRule;
+        let content = r#"use std::io;
+use std::fs;
+use std::collections::HashMap;
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert!(!messages.is_empty());
+        assert!(messages[0].fix.is_some());
+        let fix = messages[0].fix.as_ref().unwrap();
+        assert_eq!(fix.line, 0);
+        let expected = r#"use std::collections::HashMap;
+use std::fs;
+use std::io;
+"#;
+        assert_eq!(fix.replacement, expected);
+    }
+
+    #[test]
+    fn test_sort_imports_fix_preserves_non_import_lines() {
+        let rule = SortImportsRule;
+        let content = r#"use std::io;
+use std::fs;
+
+fn main() {}
+"#;
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert!(!messages.is_empty());
+        let fix = messages[0].fix.as_ref().unwrap();
+        let expected = r#"use std::fs;
+use std::io;
+
+fn main() {}
+"#;
+        assert_eq!(fix.replacement, expected);
+    }
+
+    #[test]
+    fn test_fixable_rules_report_has_fix() {
+        assert!(TrailingWhitespaceRule.has_fix());
+        assert!(NoTabsRule.has_fix());
+        assert!(FinalNewlineRule.has_fix());
+        assert!(NoConsecutiveEmptyLinesRule.has_fix());
+        assert!(NoMixedLineEndingsRule.has_fix());
+        assert!(SortImportsRule.has_fix());
+    }
+
+    #[test]
+    fn test_non_fixable_rules_report_no_fix() {
+        assert!(!LineLengthRule { max_length: 100 }.has_fix());
+        assert!(!NoEmptyFileRule.has_fix());
+        assert!(!NoTodoRule::default().has_fix());
+        assert!(!HardcodedSecretRule.has_fix());
+        assert!(!UnsafeEvalRule.has_fix());
+        assert!(!SqlInjectionRiskRule.has_fix());
+        assert!(!MaxNestingDepthRule { max_depth: 4 }.has_fix());
+        assert!(!MaxFunctionLinesRule { max_lines: 50 }.has_fix());
+    }
+
+    #[test]
+    fn test_code_from_name_maps_known_rules() {
+        assert_eq!(code_from_name("line-length"), "W001");
+        assert_eq!(code_from_name("trailing-whitespace"), "W002");
+        assert_eq!(code_from_name("no-empty-file"), "E001");
+        assert_eq!(code_from_name("hardcoded-secret"), "S001");
+        assert_eq!(code_from_name("max-nesting-depth"), "E002");
+        assert_eq!(code_from_name("sort-imports"), "W008");
+        assert_eq!(code_from_name("no-console-log"), "L001");
+        assert_eq!(code_from_name("css-avoid-important"), "L026");
+    }
+
+    #[test]
+    fn test_name_from_code_roundtrips() {
+        assert_eq!(name_from_code("W001"), "line-length");
+        assert_eq!(name_from_code("E001"), "no-empty-file");
+        assert_eq!(name_from_code("S001"), "hardcoded-secret");
+        assert_eq!(name_from_code("L001"), "no-console-log");
+    }
+
+    #[test]
+    fn test_unknown_code_returns_itself() {
+        assert_eq!(code_from_name("unknown-rule"), "unknown-rule");
+        assert_eq!(name_from_code("ZZZ999"), "ZZZ999");
+    }
+
+    #[test]
+    fn test_rule_code_method_returns_expected() {
+        assert_eq!(LineLengthRule { max_length: 100 }.code(), "W001");
+        assert_eq!(SortImportsRule.code(), "W008");
+        assert_eq!(HardcodedSecretRule.code(), "S001");
     }
 }

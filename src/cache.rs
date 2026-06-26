@@ -8,6 +8,7 @@ pub struct CacheEntry {
     pub mtime: u64,
     pub size: u64,
     pub content_hash: Option<String>,
+    pub config_hash: Option<String>,
     pub messages: Vec<LintMessage>,
 }
 
@@ -39,9 +40,16 @@ impl Cache {
         Ok(())
     }
 
-    pub fn get(&self, path: &Path, mtime: u64, size: u64) -> Option<&Vec<LintMessage>> {
+    pub fn get(
+        &self,
+        path: &Path,
+        mtime: u64,
+        size: u64,
+        config_hash: Option<&str>,
+    ) -> Option<&Vec<LintMessage>> {
         self.entries.get(path).and_then(|entry| {
-            if entry.mtime == mtime && entry.size == size {
+            let config_match = config_hash.is_none() || entry.config_hash.as_deref() == config_hash;
+            if entry.mtime == mtime && entry.size == size && config_match {
                 Some(&entry.messages)
             } else {
                 None
@@ -49,9 +57,15 @@ impl Cache {
         })
     }
 
-    pub fn get_by_hash(&self, path: &Path, hash: &str) -> Option<&Vec<LintMessage>> {
+    pub fn get_by_hash(
+        &self,
+        path: &Path,
+        hash: &str,
+        config_hash: Option<&str>,
+    ) -> Option<&Vec<LintMessage>> {
         self.entries.get(path).and_then(|entry| {
-            if entry.content_hash.as_deref() == Some(hash) {
+            let config_match = config_hash.is_none() || entry.config_hash.as_deref() == config_hash;
+            if entry.content_hash.as_deref() == Some(hash) && config_match {
                 Some(&entry.messages)
             } else {
                 None
@@ -59,25 +73,40 @@ impl Cache {
         })
     }
 
-    pub fn insert(&mut self, path: PathBuf, mtime: u64, size: u64, messages: Vec<LintMessage>) {
+    pub fn insert(
+        &mut self,
+        path: PathBuf,
+        mtime: u64,
+        size: u64,
+        config_hash: Option<String>,
+        messages: Vec<LintMessage>,
+    ) {
         self.entries.insert(
             path,
             CacheEntry {
                 mtime,
                 size,
                 content_hash: None,
+                config_hash,
                 messages,
             },
         );
     }
 
-    pub fn insert_with_hash(&mut self, path: PathBuf, hash: String, messages: Vec<LintMessage>) {
+    pub fn insert_with_hash(
+        &mut self,
+        path: PathBuf,
+        hash: String,
+        config_hash: Option<String>,
+        messages: Vec<LintMessage>,
+    ) {
         self.entries.insert(
             path,
             CacheEntry {
                 mtime: 0,
                 size: 0,
                 content_hash: Some(hash),
+                config_hash,
                 messages,
             },
         );
@@ -107,9 +136,9 @@ mod tests {
             "rule".to_string(),
             None,
         )];
-        cache.insert(path.clone(), 123, 456, messages.clone());
+        cache.insert(path.clone(), 123, 456, None, messages.clone());
 
-        let result = cache.get(&path, 123, 456);
+        let result = cache.get(&path, 123, 456, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 1);
     }
@@ -118,18 +147,28 @@ mod tests {
     fn test_cache_miss_mtime_changed() {
         let mut cache = Cache::new();
         let path = PathBuf::from("test.rs");
-        cache.insert(path.clone(), 123, 456, vec![]);
+        cache.insert(path.clone(), 123, 456, None, vec![]);
 
-        assert!(cache.get(&path, 124, 456).is_none());
+        assert!(cache.get(&path, 124, 456, None).is_none());
     }
 
     #[test]
     fn test_cache_miss_size_changed() {
         let mut cache = Cache::new();
         let path = PathBuf::from("test.rs");
-        cache.insert(path.clone(), 123, 456, vec![]);
+        cache.insert(path.clone(), 123, 456, None, vec![]);
 
-        assert!(cache.get(&path, 123, 457).is_none());
+        assert!(cache.get(&path, 123, 457, None).is_none());
+    }
+
+    #[test]
+    fn test_cache_miss_config_hash_changed() {
+        let mut cache = Cache::new();
+        let path = PathBuf::from("test.rs");
+        cache.insert(path.clone(), 123, 456, Some("abc".to_string()), vec![]);
+
+        assert!(cache.get(&path, 123, 456, Some("xyz")).is_none());
+        assert!(cache.get(&path, 123, 456, Some("abc")).is_some());
     }
 
     #[test]
@@ -146,12 +185,12 @@ mod tests {
         )];
 
         let mut cache = Cache::new();
-        cache.insert(path.clone(), 123, 456, messages);
+        cache.insert(path.clone(), 123, 456, None, messages);
         cache.save(temp_file.path())?;
 
         let loaded = Cache::load(temp_file.path())?;
-        assert!(loaded.get(&path, 123, 456).is_some());
-        assert!(loaded.get(&path, 124, 456).is_none());
+        assert!(loaded.get(&path, 123, 456, None).is_some());
+        assert!(loaded.get(&path, 124, 456, None).is_none());
 
         Ok(())
     }

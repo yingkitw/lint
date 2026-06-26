@@ -308,7 +308,7 @@ mod tests {
     fn test_handle_initialize() {
         let result = handle_initialize();
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         assert!(value.get("protocolVersion").is_some());
         assert!(value.get("capabilities").is_some());
@@ -318,7 +318,7 @@ mod tests {
     fn test_handle_tools_list() {
         let result = handle_tools_list();
         assert!(result.is_ok());
-        
+
         let value = result.unwrap();
         let tools = value.get("tools").unwrap().as_array().unwrap();
         assert_eq!(tools.len(), 2);
@@ -412,4 +412,3 @@ mod tests {
         assert!(issues.is_empty());
     }
 }
-

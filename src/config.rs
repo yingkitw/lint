@@ -32,27 +32,26 @@ pub struct Config {
     pub show_source: bool,
     #[serde(default)]
     pub no_gitignore: bool,
+    #[serde(default)]
+    pub plugins: Vec<String>,
+    pub max_nesting_depth: Option<usize>,
+    pub max_function_lines: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum CacheStrategy {
     #[default]
     Metadata,
     Content,
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RuleSetConfig {
     pub enabled_rules: Vec<String>,
     pub custom_rules_path: Option<PathBuf>,
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     #[default]
     Text,
@@ -65,7 +64,6 @@ pub enum OutputFormat {
     Gitlab,
     Grouped,
 }
-
 
 pub struct ConfigBuilder {
     paths: Vec<PathBuf>,
@@ -84,6 +82,9 @@ pub struct ConfigBuilder {
     preview: bool,
     show_source: bool,
     no_gitignore: bool,
+    plugins: Vec<String>,
+    max_nesting_depth: Option<usize>,
+    max_function_lines: Option<usize>,
 }
 
 impl ConfigBuilder {
@@ -117,6 +118,9 @@ impl ConfigBuilder {
             preview: false,
             show_source: true,
             no_gitignore: false,
+            plugins: Vec::new(),
+            max_nesting_depth: None,
+            max_function_lines: None,
         }
     }
 
@@ -205,6 +209,21 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn plugins(mut self, plugins: Vec<String>) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
+    pub fn max_nesting_depth(mut self, depth: Option<usize>) -> Self {
+        self.max_nesting_depth = depth;
+        self
+    }
+
+    pub fn max_function_lines(mut self, lines: Option<usize>) -> Self {
+        self.max_function_lines = lines;
+        self
+    }
+
     pub fn build(self) -> Config {
         Config {
             paths: self.paths,
@@ -223,6 +242,9 @@ impl ConfigBuilder {
             preview: self.preview,
             show_source: self.show_source,
             no_gitignore: self.no_gitignore,
+            plugins: self.plugins,
+            max_nesting_depth: self.max_nesting_depth,
+            max_function_lines: self.max_function_lines,
         }
     }
 }
@@ -321,6 +343,9 @@ mod tests {
             preview: false,
             show_source: true,
             no_gitignore: false,
+            plugins: vec![],
+            max_nesting_depth: None,
+            max_function_lines: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();

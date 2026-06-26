@@ -5,11 +5,17 @@ use std::sync::LazyLock;
 
 pub trait LanguageRule: Send + Sync {
     fn name(&self) -> &str;
+    fn code(&self) -> &str {
+        crate::rules::code_from_name(self.name())
+    }
     fn category(&self) -> &str {
         "correctness"
     }
     fn description(&self) -> &str {
         ""
+    }
+    fn has_fix(&self) -> bool {
+        false
     }
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
     fn supports_extension(&self, extension: &str) -> bool;
@@ -18,11 +24,16 @@ pub trait LanguageRule: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ConsoleLogRule;
 
-static CONSOLE_LOG_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"console\.(log|warn|error|info|debug)\(").unwrap());
+static CONSOLE_LOG_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"console\.(log|warn|error|info|debug)\(").unwrap());
 
 impl LanguageRule for ConsoleLogRule {
     fn name(&self) -> &str {
         "no-console-log"
+    }
+
+    fn description(&self) -> &str {
+        "Detects console.log and similar debugging statements in JS/TS code."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -60,6 +71,10 @@ impl LanguageRule for VarUsageRule {
         "no-var"
     }
 
+    fn description(&self) -> &str {
+        "Detects usage of `var` instead of `let` or `const` in JavaScript."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*NO_VAR_PATTERN;
@@ -88,11 +103,16 @@ impl LanguageRule for VarUsageRule {
 #[derive(Debug, Clone)]
 pub struct PythonPrintRule;
 
-static PYTHON_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
+static PYTHON_PRINT_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
 
 impl LanguageRule for PythonPrintRule {
     fn name(&self) -> &str {
         "no-print"
+    }
+
+    fn description(&self) -> &str {
+        "Detects print() statements that should not be in production Python code."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -126,6 +146,10 @@ pub struct PythonStyleRule;
 impl LanguageRule for PythonStyleRule {
     fn name(&self) -> &str {
         "python-style"
+    }
+
+    fn description(&self) -> &str {
+        "Enforces Python naming conventions and style guidelines."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -183,6 +207,10 @@ impl LanguageRule for GoStyleRule {
         "go-style"
     }
 
+    fn description(&self) -> &str {
+        "Enforces Go naming conventions and style guidelines."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -203,9 +231,7 @@ impl LanguageRule for GoStyleRule {
                         Severity::Warning,
                         "Exported function detected".to_string(),
                         self.name().to_string(),
-                        Some(
-                            "Ensure exported functions have documentation comments".to_string(),
-                        ),
+                        Some("Ensure exported functions have documentation comments".to_string()),
                     ));
                 }
             }
@@ -225,6 +251,10 @@ pub struct JavaStyleRule;
 impl LanguageRule for JavaStyleRule {
     fn name(&self) -> &str {
         "java-style"
+    }
+
+    fn description(&self) -> &str {
+        "Enforces Java naming conventions and style guidelines."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -278,6 +308,10 @@ impl LanguageRule for RustUnwrapRule {
         "no-unwrap"
     }
 
+    fn description(&self) -> &str {
+        "Detects `.unwrap()` calls that can panic; prefer `?` or explicit error handling."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*UNWRAP_PATTERN;
@@ -311,6 +345,10 @@ static EXPECT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.expect\
 impl LanguageRule for RustExpectRule {
     fn name(&self) -> &str {
         "no-expect"
+    }
+
+    fn description(&self) -> &str {
+        "Detects `.expect()` calls that can panic; prefer `?` or explicit error handling."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -350,6 +388,10 @@ impl LanguageRule for SemicolonRule {
         "style"
     }
 
+    fn description(&self) -> &str {
+        "Detects missing semicolons in JS/TS/Java/C-style code."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -373,7 +415,9 @@ impl LanguageRule for SemicolonRule {
                 && !trimmed.contains("=>")
                 && !trimmed.contains("import")
                 && !trimmed.contains("export")
-                && (trimmed.contains("=") || trimmed.contains("print") || trimmed.contains("println"))
+                && (trimmed.contains("=")
+                    || trimmed.contains("print")
+                    || trimmed.contains("println"))
             {
                 messages.push(LintMessage::new(
                     line_num + 1,
@@ -402,6 +446,10 @@ static PUTS_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bputs\s").
 impl LanguageRule for RubyPutsRule {
     fn name(&self) -> &str {
         "no-puts"
+    }
+
+    fn description(&self) -> &str {
+        "Detects `puts` statements that should not be in production Ruby code."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -435,6 +483,10 @@ pub struct RubyStyleRule;
 impl LanguageRule for RubyStyleRule {
     fn name(&self) -> &str {
         "ruby-style"
+    }
+
+    fn description(&self) -> &str {
+        "Enforces Ruby naming conventions and style guidelines."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -488,6 +540,10 @@ impl LanguageRule for PhpEchoRule {
         "no-echo"
     }
 
+    fn description(&self) -> &str {
+        "Detects `echo` statements that should not be in production PHP code."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*PHP_ECHO_PATTERN;
@@ -500,7 +556,10 @@ impl LanguageRule for PhpEchoRule {
                     Severity::Warning,
                     "echo statement found".to_string(),
                     self.name().to_string(),
-                    Some("Use error_log() for debugging or return JSON for API responses".to_string()),
+                    Some(
+                        "Use error_log() for debugging or return JSON for API responses"
+                            .to_string(),
+                    ),
                 ));
             }
         }
@@ -516,11 +575,16 @@ impl LanguageRule for PhpEchoRule {
 #[derive(Debug, Clone)]
 pub struct SwiftPrintRule;
 
-static SWIFT_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
+static SWIFT_PRINT_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bprint\s*\(").unwrap());
 
 impl LanguageRule for SwiftPrintRule {
     fn name(&self) -> &str {
         "no-swift-print"
+    }
+
+    fn description(&self) -> &str {
+        "Detects `print()` statements that should not be in production Swift code."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -554,6 +618,10 @@ pub struct KotlinStyleRule;
 impl LanguageRule for KotlinStyleRule {
     fn name(&self) -> &str {
         "kotlin-style"
+    }
+
+    fn description(&self) -> &str {
+        "Enforces Kotlin naming conventions and style guidelines."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -607,6 +675,10 @@ impl LanguageRule for DartPrintRule {
         "no-dart-print"
     }
 
+    fn description(&self) -> &str {
+        "Detects `print()` statements that should not be in production Dart code."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*DART_PRINT_PATTERN;
@@ -635,11 +707,16 @@ impl LanguageRule for DartPrintRule {
 #[derive(Debug, Clone)]
 pub struct CSharpConsoleRule;
 
-static CSHARP_CONSOLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Console\.(WriteLine?|Write)\s*\(").unwrap());
+static CSHARP_CONSOLE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Console\.(WriteLine?|Write)\s*\(").unwrap());
 
 impl LanguageRule for CSharpConsoleRule {
     fn name(&self) -> &str {
         "no-csharp-console"
+    }
+
+    fn description(&self) -> &str {
+        "Detects `Console.WriteLine` and similar debug output in C# code."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -674,6 +751,10 @@ pub struct CSharpStyleRule;
 impl LanguageRule for CSharpStyleRule {
     fn name(&self) -> &str {
         "csharp-style"
+    }
+
+    fn description(&self) -> &str {
+        "Enforces C# naming conventions and style guidelines."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -714,6 +795,10 @@ impl LanguageRule for ShellEchoRule {
         "shell-echo-quote"
     }
 
+    fn description(&self) -> &str {
+        "Warns about unquoted variables in shell echo statements to prevent word splitting."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -731,7 +816,10 @@ impl LanguageRule for ShellEchoRule {
                     Severity::Warning,
                     "Unquoted variable in echo".to_string(),
                     self.name().to_string(),
-                    Some("Quote variables: 'echo $VAR' → 'echo \"$VAR\"' to prevent word splitting".to_string()),
+                    Some(
+                        "Quote variables: 'echo $VAR' → 'echo \"$VAR\"' to prevent word splitting"
+                            .to_string(),
+                    ),
                 ));
             }
         }
@@ -747,11 +835,16 @@ impl LanguageRule for ShellEchoRule {
 #[derive(Debug, Clone)]
 pub struct SqlSelectStarRule;
 
-static SQL_SELECT_STAR_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)SELECT\s+\*").unwrap());
+static SQL_SELECT_STAR_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)SELECT\s+\*").unwrap());
 
 impl LanguageRule for SqlSelectStarRule {
     fn name(&self) -> &str {
         "sql-no-select-star"
+    }
+
+    fn description(&self) -> &str {
+        "Warns about `SELECT *` queries that can break when table schemas change."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -759,7 +852,10 @@ impl LanguageRule for SqlSelectStarRule {
         let pattern = &*SQL_SELECT_STAR_PATTERN;
 
         for (line_num, line) in content.lines().enumerate() {
-            if pattern.is_match(line) && !line.trim_start().starts_with("--") && !line.trim_start().starts_with("/*") {
+            if pattern.is_match(line)
+                && !line.trim_start().starts_with("--")
+                && !line.trim_start().starts_with("/*")
+            {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("SELECT").or(line.find("select")).unwrap_or(0),
@@ -787,6 +883,10 @@ static LUA_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bprin
 impl LanguageRule for LuaPrintRule {
     fn name(&self) -> &str {
         "no-lua-print"
+    }
+
+    fn description(&self) -> &str {
+        "Detects `print()` statements that should not be in production Lua code."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -817,11 +917,16 @@ impl LanguageRule for LuaPrintRule {
 #[derive(Debug, Clone)]
 pub struct ScalaPrintRule;
 
-static SCALA_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"println\s*\(").unwrap());
+static SCALA_PRINT_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"println\s*\(").unwrap());
 
 impl LanguageRule for ScalaPrintRule {
     fn name(&self) -> &str {
         "no-scala-println"
+    }
+
+    fn description(&self) -> &str {
+        "Detects `println()` statements that should not be in production Scala code."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -836,7 +941,10 @@ impl LanguageRule for ScalaPrintRule {
                     Severity::Warning,
                     "println() call found".to_string(),
                     self.name().to_string(),
-                    Some("Use slf4j: LoggerFactory.getLogger(getClass).info(\"message\")".to_string()),
+                    Some(
+                        "Use slf4j: LoggerFactory.getLogger(getClass).info(\"message\")"
+                            .to_string(),
+                    ),
                 ));
             }
         }
@@ -859,6 +967,10 @@ impl LanguageRule for RPrintRule {
         "no-r-print"
     }
 
+    fn description(&self) -> &str {
+        "Detects `print()` statements that should not be in production R code."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*R_PRINT_PATTERN;
@@ -871,7 +983,10 @@ impl LanguageRule for RPrintRule {
                     Severity::Info,
                     "print() call found".to_string(),
                     self.name().to_string(),
-                    Some("Use message() for user output or cat() with appropriate formatting".to_string()),
+                    Some(
+                        "Use message() for user output or cat() with appropriate formatting"
+                            .to_string(),
+                    ),
                 ));
             }
         }
@@ -887,11 +1002,16 @@ impl LanguageRule for RPrintRule {
 #[derive(Debug, Clone)]
 pub struct ZigDebugPrintRule;
 
-static ZIG_DEBUG_PRINT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"std\.debug\.print").unwrap());
+static ZIG_DEBUG_PRINT_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"std\.debug\.print").unwrap());
 
 impl LanguageRule for ZigDebugPrintRule {
     fn name(&self) -> &str {
         "no-zig-debug-print"
+    }
+
+    fn description(&self) -> &str {
+        "Detects `std.debug.print` statements that should not be in production Zig code."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -906,7 +1026,10 @@ impl LanguageRule for ZigDebugPrintRule {
                     Severity::Warning,
                     "std.debug.print detected".to_string(),
                     self.name().to_string(),
-                    Some("Remove debug prints before release or use std.log for structured logging".to_string()),
+                    Some(
+                        "Remove debug prints before release or use std.log for structured logging"
+                            .to_string(),
+                    ),
                 ));
             }
         }
@@ -922,11 +1045,16 @@ impl LanguageRule for ZigDebugPrintRule {
 #[derive(Debug, Clone)]
 pub struct HtmlInlineStyleRule;
 
-static HTML_STYLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"style\s*=\s*["']"#).unwrap());
+static HTML_STYLE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"style\s*=\s*["']"#).unwrap());
 
 impl LanguageRule for HtmlInlineStyleRule {
     fn name(&self) -> &str {
         "html-no-inline-style"
+    }
+
+    fn description(&self) -> &str {
+        "Warns about inline `style` attributes in HTML; prefer CSS classes."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -964,6 +1092,10 @@ impl LanguageRule for HtmlMissingAltRule {
         "html-img-alt"
     }
 
+    fn description(&self) -> &str {
+        "Warns about `<img>` tags missing `alt` attributes for accessibility."
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let img_pattern = &*HTML_IMG_PATTERN;
@@ -992,11 +1124,16 @@ impl LanguageRule for HtmlMissingAltRule {
 #[derive(Debug, Clone)]
 pub struct CssImportantRule;
 
-static CSS_IMPORTANT_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"!important").unwrap());
+static CSS_IMPORTANT_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"!important").unwrap());
 
 impl LanguageRule for CssImportantRule {
     fn name(&self) -> &str {
         "css-avoid-important"
+    }
+
+    fn description(&self) -> &str {
+        "Warns about `!important` usage in CSS that can break maintainability."
     }
 
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
@@ -1061,8 +1198,26 @@ impl LanguageRuleSet {
         Self { rules }
     }
 
+    pub fn new_filtered(enabled: &std::collections::HashSet<String>) -> Self {
+        let all = Self::new();
+        let rules = all
+            .rules
+            .into_iter()
+            .filter(|r| enabled.contains(r.name()))
+            .collect();
+        Self { rules }
+    }
+
     pub fn get_rules(&self) -> &[Box<dyn LanguageRule>] {
         &self.rules
+    }
+
+    pub fn known_rules() -> Vec<String> {
+        Self::new()
+            .rules
+            .iter()
+            .map(|r| r.name().to_string())
+            .collect()
     }
 
     pub fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage> {

@@ -108,7 +108,11 @@ impl LintResult {
         }
 
         // Full-content fixes (line == 0) replace the entire file content
-        if let Some(fix) = self.messages.iter().find_map(|m| m.fix.as_ref().filter(|f| f.line == 0)) {
+        if let Some(fix) = self
+            .messages
+            .iter()
+            .find_map(|m| m.fix.as_ref().filter(|f| f.line == 0))
+        {
             self.file_content = fix.replacement.clone();
             return true;
         }
@@ -325,10 +329,7 @@ mod tests {
 
     #[test]
     fn test_apply_fixes_no_fixes() {
-        let mut result = LintResult::new(
-            PathBuf::from("test.rs"),
-            "let x = 5;\n".to_string(),
-        );
+        let mut result = LintResult::new(PathBuf::from("test.rs"), "let x = 5;\n".to_string());
 
         result.add_message(LintMessage::new(
             1,

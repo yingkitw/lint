@@ -76,20 +76,42 @@ cargo test --all-targets --all-features
 6. **Performance**: Check for new `clone()`, `to_string()`, or per-check `Regex::new()` calls.
 7. Run the verification stack (Phase 3) again after cleanup.
 
-### Phase 6 — Competitive Intelligence (every milestone, or when TODO is empty)
+### Phase 6 — Competitive Intelligence (every milestone, or when brainstorming < 5 items)
 
 1. Research similar open-source tools (Ruff, Biome, oxlint, ESLint, clippy).
 2. Identify 3–5 capabilities they have that this project lacks.
-3. Add the most valuable ones to `TODO.md` brainstorming section.
-4. If the current milestone is complete, propose the next milestone to the user.
+3. Add the most valuable ones to `TODO.md` brainstorming section with rationale.
+4. Do NOT stop to ask the user. Feed the best item directly into Phase 8.
 
-### Phase 7 — Checkpoint or Continue
+The goal of competitive intelligence is to keep the pipeline full, not to pause work.
+
+### Phase 7 — Milestone Completion Check
 
 - If the milestone has uncompleted items → go to Phase 1.
-- If the milestone is complete → STOP and report to the user:
-  - Summary of all items completed.
-  - Lines changed, test count, any clippy suppressions added.
-  - Suggested next milestone based on competitive intelligence.
+- If the milestone is complete → do NOT stop. Proceed to Phase 8.
+
+### Phase 8 — Next Milestone Selection (autonomous continuation)
+
+When a milestone completes, the agent must continue working without human intervention:
+
+1. Read `TODO.md` competitive-intelligence / brainstorming section.
+2. Pick the highest-value, lowest-effort unimplemented item from brainstorming.
+3. Promote it to a new milestone in `TODO.md`:
+   - Add a `## Milestone: <Name>` heading.
+   - Add 3–7 concrete, checkable sub-items as `[ ]` tasks.
+   - Estimate effort (small / medium / large).
+4. Go to Phase 1 and start the new milestone immediately.
+
+**Stop conditions** (only one of these may halt the loop):
+- The agent has completed **5 or more items** in this session AND the current milestone is done.
+- `TODO.md` brainstorming section is empty AND no open GitHub issues / feature requests are available.
+- A task requires a user decision (e.g., choosing between two architectures, adding a paid service, changing license).
+- `cargo test` or `cargo clippy` fails and the root cause is unclear after 15 minutes of debugging.
+
+When stopping, report to the user:
+- Summary of all milestones completed this session.
+- Items done, lines changed, test count, any clippy suppressions added.
+- Current milestone status (if mid-milestone) or next proposed milestone.
 
 ---
 
@@ -102,7 +124,8 @@ cargo test --all-targets --all-features
 | TODO item is vague or too large | Break it into smaller items, update `TODO.md`, and do the first one. |
 | Unsure how to implement an item | Read `ARCHITECTURE.md`, then relevant source files. If still unclear, STOP and ask the user. Do not guess. |
 | External API / crate needed | Check `Cargo.toml` compatibility. If adding a dep, justify it in `progress.txt`. Prefer existing deps. |
-| 30+ minutes spent on one item | Checkpoint in `progress.txt`, then either: (a) ask user for guidance, or (b) if a clear simpler path exists, switch to it and note the pivot. |
+| 45+ minutes spent on one item | Checkpoint in `progress.txt`, then either: (a) ask user for guidance, or (b) if a clear simpler path exists, switch to it and note the pivot. |
+| Stuck on a non-critical item | Park it (mark `[ ]` with a `BLOCKED:` note), skip to the next item in the milestone, and come back later. Do not let one item stall the entire session. |
 
 ---
 
@@ -126,3 +149,5 @@ cargo test --all-targets --all-features
 - **Test before ship**: No feature is complete until all relevant tests pass.
 - **Docs are code**: Documentation drift is a bug. Update docs in the same commit as the code.
 - **Autonomous but not reckless**: When uncertain, stop and ask. Never fake functionality or skip verification.
+- **Momentum over perfection**: It is better to complete 4 good features than to get stuck polishing 1. Park blockers and move forward.
+- **Long runs are the default**: A session should complete multiple milestones or items before stopping. Stopping after one item is an exception, not the rule.

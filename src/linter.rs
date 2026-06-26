@@ -4,8 +4,8 @@ use crate::language_rules::LanguageRuleSet;
 use crate::output::{LintMessage, LintResult, Severity};
 use crate::rules::{Rule, RuleSet};
 use anyhow::{Context, Result};
-use ignore::gitignore::GitignoreBuilder;
 use ignore::WalkBuilder;
+use ignore::gitignore::GitignoreBuilder;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -20,6 +20,14 @@ struct SuppressionDirective {
     is_block: bool,
 }
 
+struct DirConfig {
+    config: Config,
+    rule_set: RuleSet,
+    language_rule_set: LanguageRuleSet,
+    gitignore: Option<ignore::gitignore::Gitignore>,
+    ignore_names: std::collections::HashSet<String>,
+}
+
 pub struct Linter {
     config: Config,
     rule_set: RuleSet,
@@ -27,6 +35,7 @@ pub struct Linter {
     cache: Option<Arc<Mutex<Cache>>>,
     gitignore: Option<ignore::gitignore::Gitignore>,
     ignore_names: std::collections::HashSet<String>,
+    per_dir_configs: std::collections::HashMap<PathBuf, DirConfig>,
 }
 
 impl Linter {
@@ -35,6 +44,59 @@ impl Linter {
     }
 
     pub fn new_with_cache(config: &Config, cache: Option<Arc<Mutex<Cache>>>) -> Self {
+        Self::new_with_per_dir_configs(config, cache, HashMap::new())
+    }
+
+    pub fn new_with_per_dir_configs(
+        config: &Config,
+        cache: Option<Arc<Mutex<Cache>>>,
+        per_dir_configs: std::collections::HashMap<PathBuf, Config>,
+    ) -> Self {
+        let (rule_set, language_rule_set, gitignore, ignore_names) =
+            Self::build_from_config(config);
+
+        let mut per_dir = HashMap::new();
+        for (dir, cfg) in per_dir_configs {
+            let (rs, lrs, gi, ign) = Self::build_from_config(&cfg);
+            per_dir.insert(
+                dir,
+                DirConfig {
+                    config: cfg,
+                    rule_set: rs,
+                    language_rule_set: lrs,
+                    gitignore: gi,
+                    ignore_names: ign,
+                },
+            );
+        }
+
+        Self {
+            config: config.clone(),
+            rule_set,
+            language_rule_set,
+            cache,
+            gitignore,
+            ignore_names,
+            per_dir_configs: per_dir,
+        }
+    }
+
+    pub fn rule_set(&self) -> &RuleSet {
+        &self.rule_set
+    }
+
+    pub fn language_rule_set(&self) -> &LanguageRuleSet {
+        &self.language_rule_set
+    }
+
+    fn build_from_config(
+        config: &Config,
+    ) -> (
+        RuleSet,
+        LanguageRuleSet,
+        Option<ignore::gitignore::Gitignore>,
+        std::collections::HashSet<String>,
+    ) {
         let gitignore = if config.no_gitignore {
             None
         } else {
@@ -43,7 +105,16 @@ impl Linter {
             builder.build().ok()
         };
 
-        let ignore_names: std::collections::HashSet<String> = config.ignore_patterns.iter().cloned().collect();
+        let ignore_names: std::collections::HashSet<String> =
+            config.ignore_patterns.iter().cloned().collect();
+
+        let mut enabled: std::collections::HashSet<String> =
+            config.rule_set.enabled_rules.iter().cloned().collect();
+        for plugin in &config.plugins {
+            for rule_name in crate::rules::plugin_rules(plugin) {
+                enabled.insert(rule_name);
+            }
+        }
 
         let mut rule_set = RuleSet::new();
 
@@ -58,14 +129,20 @@ impl Linter {
             Box::new(crate::rules::NoTabsRule) as Box<dyn Rule>,
             Box::new(crate::rules::FinalNewlineRule) as Box<dyn Rule>,
             Box::new(crate::rules::NoMixedLineEndingsRule) as Box<dyn Rule>,
+            Box::new(crate::rules::HardcodedSecretRule) as Box<dyn Rule>,
+            Box::new(crate::rules::UnsafeEvalRule) as Box<dyn Rule>,
+            Box::new(crate::rules::SqlInjectionRiskRule) as Box<dyn Rule>,
+            Box::new(crate::rules::MaxNestingDepthRule {
+                max_depth: config.max_nesting_depth.unwrap_or(4),
+            }) as Box<dyn Rule>,
+            Box::new(crate::rules::MaxFunctionLinesRule {
+                max_lines: config.max_function_lines.unwrap_or(50),
+            }) as Box<dyn Rule>,
+            Box::new(crate::rules::SortImportsRule) as Box<dyn Rule>,
         ];
 
         for rule in rules {
-            if config
-                .rule_set
-                .enabled_rules
-                .contains(&rule.name().to_string())
-            {
+            if enabled.contains(rule.name()) {
                 rule_set = rule_set.add_rule(rule);
             }
         }
@@ -77,24 +154,61 @@ impl Linter {
         {
             for def in definitions {
                 if let Ok(rule) = crate::rules::CustomRule::from_definition(def)
-                    && config
-                        .rule_set
-                        .enabled_rules
-                        .contains(&rule.name().to_string())
+                    && enabled.contains(rule.name())
                 {
                     rule_set = rule_set.add_rule(Box::new(rule));
                 }
             }
         }
 
-        Self {
-            config: config.clone(),
-            rule_set,
-            language_rule_set: LanguageRuleSet::new(),
-            cache,
-            gitignore,
-            ignore_names,
+        let language_rule_set = if config.plugins.is_empty() {
+            LanguageRuleSet::new()
+        } else {
+            LanguageRuleSet::new_filtered(&enabled)
+        };
+
+        (rule_set, language_rule_set, gitignore, ignore_names)
+    }
+
+    fn effective_config(&self, path: &Path) -> &Config {
+        if let Some(parent) = path.parent()
+            && let Some(dir_cfg) = self.per_dir_configs.get(parent)
+        {
+            return &dir_cfg.config;
         }
+        &self.config
+    }
+
+    fn effective_rule_sets(&self, path: &Path) -> (&RuleSet, &LanguageRuleSet) {
+        if let Some(parent) = path.parent()
+            && let Some(dir_cfg) = self.per_dir_configs.get(parent)
+        {
+            return (&dir_cfg.rule_set, &dir_cfg.language_rule_set);
+        }
+        (&self.rule_set, &self.language_rule_set)
+    }
+
+    fn is_ignored_for_path(&self, path: &Path, dir_cfg: Option<&DirConfig>) -> bool {
+        let ignore_names = dir_cfg
+            .map(|d| &d.ignore_names)
+            .unwrap_or(&self.ignore_names);
+        for component in path.components() {
+            if let Some(name) = component.as_os_str().to_str()
+                && ignore_names.contains(name)
+            {
+                return true;
+            }
+        }
+        let gitignore = dir_cfg
+            .and_then(|d| d.gitignore.as_ref())
+            .or(self.gitignore.as_ref());
+        if let Some(gi) = gitignore {
+            let is_dir = path.is_dir();
+            if gi.matched(path, is_dir).is_ignore() {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn list_files(&self) -> Vec<PathBuf> {
@@ -138,9 +252,10 @@ impl Linter {
 
     fn lint_path(&self, path: &Path) -> Result<Vec<LintResult>> {
         let mut results = Vec::new();
+        let dir_cfg = path.parent().and_then(|p| self.per_dir_configs.get(p));
 
         if path.is_file() {
-            if self.config.force_exclude && self.is_ignored(path) {
+            if self.config.force_exclude && self.is_ignored_for_path(path, dir_cfg) {
                 return Ok(results);
             }
             let result = self.lint_file(path)?;
@@ -163,10 +278,12 @@ impl Linter {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
-                    if self.is_ignored(path) {
+                    let dir_cfg = path.parent().and_then(|p| self.per_dir_configs.get(p));
+                    if self.is_ignored_for_path(path, dir_cfg) {
                         continue;
                     }
-                    if path.is_file() && self.should_lint_file(path)
+                    if path.is_file()
+                        && self.should_lint_file(path)
                         && let Ok(result) = self.lint_file(path)
                     {
                         results.push(result);
@@ -182,25 +299,13 @@ impl Linter {
     }
 
     fn is_ignored(&self, path: &Path) -> bool {
-        for component in path.components() {
-            if let Some(name) = component.as_os_str().to_str()
-                && self.ignore_names.contains(name)
-            {
-                return true;
-            }
-        }
-        if let Some(ref gitignore) = self.gitignore {
-            let is_dir = path.is_dir();
-            if gitignore.matched(path, is_dir).is_ignore() {
-                return true;
-            }
-        }
-        false
+        self.is_ignored_for_path(path, None)
     }
 
-    fn effective_path<'a>(&'a self, path: &'a Path) -> &'a Path {
-        if let Some(ref stdin_path) = self.config.stdin_file_path
-            && path.file_name()
+    fn effective_path<'a>(&'a self, path: &'a Path, config: &'a Config) -> &'a Path {
+        if let Some(ref stdin_path) = config.stdin_file_path
+            && path
+                .file_name()
                 .and_then(|f| f.to_str())
                 .is_some_and(|f| f.starts_with("lint_stdin_"))
         {
@@ -211,11 +316,36 @@ impl Linter {
     }
 
     fn lint_file(&self, path: &Path) -> Result<LintResult> {
-        let use_content_hash = self.config.cache_strategy == crate::config::CacheStrategy::Content;
+        let config = self.effective_config(path);
+        let (_rule_set, _language_rule_set) = self.effective_rule_sets(path);
+        let use_content_hash = config.cache_strategy == crate::config::CacheStrategy::Content;
+
+        let config_hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            let mut enabled = config.rule_set.enabled_rules.clone();
+            enabled.sort();
+            enabled.hash(&mut hasher);
+            config.max_line_length.hash(&mut hasher);
+            config.max_nesting_depth.hash(&mut hasher);
+            config.max_function_lines.hash(&mut hasher);
+            let mut overrides: Vec<(&String, &crate::output::Severity)> =
+                config.severity_overrides.iter().collect();
+            overrides.sort_by_key(|(k, _)| *k);
+            overrides.hash(&mut hasher);
+            config.ignore_suppressions.hash(&mut hasher);
+            format!("{:x}", hasher.finish())
+        };
 
         let metadata = fs::metadata(path);
         let cache_key = metadata.as_ref().ok().and_then(|m| {
-            let mtime = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            let mtime = m
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
             let size = m.len();
             Some((mtime, size))
         });
@@ -225,8 +355,11 @@ impl Linter {
             && let Some(ref cache) = self.cache
         {
             let cache_guard = cache.lock().unwrap();
-            if let Some(cached_messages) = cache_guard.get(path, mtime, size) {
-                let mut result = LintResult::new(self.effective_path(path).to_path_buf(), String::new());
+            if let Some(cached_messages) = cache_guard.get(path, mtime, size, Some(&config_hash)) {
+                let mut result = LintResult::new(
+                    self.effective_path(path, config).to_path_buf(),
+                    String::new(),
+                );
                 result.messages = cached_messages.clone();
                 return Ok(result);
             }
@@ -236,9 +369,7 @@ impl Linter {
             .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
         // Content-based fallback: if metadata changed but content didn't
-        if use_content_hash
-            && let Some(ref cache) = self.cache
-        {
+        if use_content_hash && let Some(ref cache) = self.cache {
             let hash = format!("{:x}", {
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
@@ -247,44 +378,76 @@ impl Linter {
                 hasher.finish()
             });
             let cache_guard = cache.lock().unwrap();
-            if let Some(cached_messages) = cache_guard.get_by_hash(path, &hash) {
-                let mut result = LintResult::new(self.effective_path(path).to_path_buf(), content);
+            if let Some(cached_messages) = cache_guard.get_by_hash(path, &hash, Some(&config_hash))
+            {
+                let mut result =
+                    LintResult::new(self.effective_path(path, config).to_path_buf(), content);
                 result.messages = cached_messages.clone();
                 return Ok(result);
             }
         }
 
-        let mut result = LintResult::new(self.effective_path(path).to_path_buf(), content);
+        let result = self.lint_content(&content, path)?;
+
+        if !use_content_hash {
+            if let Some((mtime, size)) = cache_key
+                && let Some(ref cache) = self.cache
+            {
+                let mut cache_guard = cache.lock().unwrap();
+                cache_guard.insert(
+                    path.to_path_buf(),
+                    mtime,
+                    size,
+                    Some(config_hash.clone()),
+                    result.messages.clone(),
+                );
+            }
+        } else if let Some(ref cache) = self.cache {
+            let hash = format!("{:x}", {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                result.file_content.hash(&mut hasher);
+                hasher.finish()
+            });
+            let mut cache_guard = cache.lock().unwrap();
+            cache_guard.insert_with_hash(
+                path.to_path_buf(),
+                hash,
+                Some(config_hash.clone()),
+                result.messages.clone(),
+            );
+        }
+
+        Ok(result)
+    }
+
+    pub fn lint_content(&self, content: &str, path: &Path) -> Result<LintResult> {
+        let config = self.effective_config(path);
+        let (rule_set, language_rule_set) = self.effective_rule_sets(path);
+
+        let mut result = LintResult::new(
+            self.effective_path(path, config).to_path_buf(),
+            content.to_string(),
+        );
 
         let file_level_ignored = Self::parse_file_level_ignore(&result.file_content);
-        if file_level_ignored.as_ref().is_some_and(|rules| rules.is_empty()) {
-            if !use_content_hash {
-                if let Some((mtime, size)) = cache_key
-                    && let Some(ref cache) = self.cache
-                {
-                    let mut cache_guard = cache.lock().unwrap();
-                    cache_guard.insert(path.to_path_buf(), mtime, size, result.messages.clone());
-                }
-            } else if let Some(ref cache) = self.cache {
-                let hash = format!("{:x}", {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    result.file_content.hash(&mut hasher);
-                    hasher.finish()
-                });
-                let mut cache_guard = cache.lock().unwrap();
-                cache_guard.insert_with_hash(path.to_path_buf(), hash, result.messages.clone());
-            }
+        if file_level_ignored
+            .as_ref()
+            .is_some_and(|rules| rules.is_empty())
+        {
             return Ok(result);
         }
 
-        for rule in self.rule_set.get_rules() {
-            if !self.config.ignore_suppressions
-                && file_level_ignored
-                    .as_ref()
-                    .is_some_and(|rules| rules.contains(&rule.name().to_string()))
-            {
+        let is_file_ignored = |rule_name: &str| {
+            let code = crate::rules::code_from_name(rule_name);
+            file_level_ignored.as_ref().is_some_and(|rules| {
+                rules.contains(&rule_name.to_string()) || rules.contains(&code.to_string())
+            })
+        };
+
+        for rule in rule_set.get_rules() {
+            if !config.ignore_suppressions && is_file_ignored(rule.name()) {
                 continue;
             }
             let messages = rule.check(&result.file_content, path);
@@ -293,24 +456,23 @@ impl Linter {
             }
         }
 
-        let language_messages = self.language_rule_set.check(&result.file_content, path);
+        let language_messages = language_rule_set.check(&result.file_content, path);
         for message in language_messages {
-            if !self.config.ignore_suppressions
-                && file_level_ignored
-                    .as_ref()
-                    .is_some_and(|rules| rules.contains(&message.rule))
-            {
+            if !config.ignore_suppressions && is_file_ignored(&message.rule) {
                 continue;
             }
             result.add_message(message);
         }
 
-        if !self.config.ignore_suppressions {
+        if !config.ignore_suppressions {
             let lines: Vec<&str> = result.file_content.lines().collect();
             let directives = Self::parse_suppression_directives(&lines);
             let disabled_by_line = Self::parse_block_suppressions(&lines);
 
-            let check_unused = self.config.rule_set.enabled_rules.contains(&"unused-suppression".to_string());
+            let check_unused = config
+                .rule_set
+                .enabled_rules
+                .contains(&"unused-suppression".to_string());
             let mut unused_suppressions = Vec::new();
 
             if check_unused {
@@ -318,13 +480,22 @@ impl Linter {
                     let used = if d.is_block {
                         result.messages.iter().any(|msg| {
                             let line_idx = msg.line.saturating_sub(1);
-                            line_idx >= d.start_line && line_idx < d.end_line
-                                && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
+                            let msg_code = crate::rules::code_from_name(&msg.rule);
+                            line_idx >= d.start_line
+                                && line_idx < d.end_line
+                                && (d.rule.is_none()
+                                    || d.rule
+                                        .as_ref()
+                                        .is_some_and(|r| r == &msg.rule || r == msg_code))
                         })
                     } else {
                         result.messages.iter().any(|msg| {
+                            let msg_code = crate::rules::code_from_name(&msg.rule);
                             msg.line.saturating_sub(1) == d.start_line
-                                && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
+                                && (d.rule.is_none()
+                                    || d.rule
+                                        .as_ref()
+                                        .is_some_and(|r| r == &msg.rule || r == msg_code))
                         })
                     };
                     if !used {
@@ -336,9 +507,14 @@ impl Linter {
             result.messages.retain(|msg| {
                 if let Some(line) = lines.get(msg.line.saturating_sub(1)) {
                     let inline_suppressed = Self::is_line_suppressed(line, &msg.rule);
+                    let rule_code = crate::rules::code_from_name(&msg.rule);
                     let block_suppressed = disabled_by_line
                         .get(&msg.line.saturating_sub(1))
-                        .is_some_and(|disabled| disabled.is_empty() || disabled.contains(&msg.rule));
+                        .is_some_and(|disabled| {
+                            disabled.is_empty()
+                                || disabled.contains(&msg.rule)
+                                || disabled.contains(rule_code)
+                        });
                     !(inline_suppressed || block_suppressed)
                 } else {
                     true
@@ -357,15 +533,17 @@ impl Linter {
                     Severity::Warning,
                     message,
                     "unused-suppression".to_string(),
-                    Some("Remove this suppression comment or fix the underlying issue.".to_string()),
+                    Some(
+                        "Remove this suppression comment or fix the underlying issue.".to_string(),
+                    ),
                 ));
             }
         }
 
-        if !self.config.per_file_ignores.is_empty() {
-            let path_str = self.effective_path(path).to_string_lossy();
+        if !config.per_file_ignores.is_empty() {
+            let path_str = self.effective_path(path, config).to_string_lossy();
             let mut ignored_rules: Vec<&str> = Vec::new();
-            for (pattern, rules) in &self.config.per_file_ignores {
+            for (pattern, rules) in &config.per_file_ignores {
                 if let Ok(glob_pattern) = glob::Pattern::new(pattern)
                     && glob_pattern.matches(&path_str)
                 {
@@ -373,50 +551,34 @@ impl Linter {
                 }
             }
             if !ignored_rules.is_empty() {
-                result.messages.retain(|msg| !ignored_rules.contains(&msg.rule.as_str()));
+                result
+                    .messages
+                    .retain(|msg| !ignored_rules.contains(&msg.rule.as_str()));
             }
         }
 
-        if !self.config.severity_overrides.is_empty() {
+        if !config.severity_overrides.is_empty() {
             for msg in &mut result.messages {
-                if let Some(severity) = self.config.severity_overrides.get(&msg.rule) {
+                if let Some(severity) = config.severity_overrides.get(&msg.rule) {
                     msg.severity = *severity;
                 }
             }
-        }
-
-        if !use_content_hash {
-            if let Some((mtime, size)) = cache_key
-                && let Some(ref cache) = self.cache
-            {
-                let mut cache_guard = cache.lock().unwrap();
-                cache_guard.insert(path.to_path_buf(), mtime, size, result.messages.clone());
-            }
-        } else if let Some(ref cache) = self.cache {
-            let hash = format!("{:x}", {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                result.file_content.hash(&mut hasher);
-                hasher.finish()
-            });
-            let mut cache_guard = cache.lock().unwrap();
-            cache_guard.insert_with_hash(path.to_path_buf(), hash, result.messages.clone());
         }
 
         Ok(result)
     }
 
     fn is_line_suppressed(line: &str, rule_name: &str) -> bool {
+        let rule_code = crate::rules::code_from_name(rule_name);
         if let Some(pos) = line.find("lint: ignore") {
             let after = &line[pos + "lint: ignore".len()..];
-            let after = after.trim_start();
+            let after = after.trim_start().trim_end_matches("*/").trim();
             if after.is_empty() {
                 return true;
             }
             if let Some(stripped) = after.strip_prefix('=') {
-                let suppressed = stripped.trim();
-                return suppressed == rule_name;
+                let items: Vec<&str> = stripped.split(',').map(|s| s.trim()).collect();
+                return items.contains(&rule_name) || items.contains(&rule_code);
             }
         }
         false
@@ -430,26 +592,30 @@ impl Linter {
         for (i, line) in lines.iter().enumerate() {
             if let Some(pos) = line.find("lint: disable") {
                 let after = &line[pos + "lint: disable".len()..];
-                let after = after.trim_start();
+                let after = after.trim_start().trim_end_matches("*/").trim();
                 if after.is_empty() {
                     all_disabled = true;
                     disabled_rules.clear();
                 } else if let Some(stripped) = after.strip_prefix('=') {
-                    let rule = stripped.trim().to_string();
-                    if !all_disabled {
-                        disabled_rules.insert(rule);
+                    for rule in stripped.split(',').map(|s| s.trim()) {
+                        let rule = rule.to_string();
+                        if !all_disabled {
+                            disabled_rules.insert(rule);
+                        }
                     }
                 }
             } else if let Some(pos) = line.find("lint: enable") {
                 let after = &line[pos + "lint: enable".len()..];
-                let after = after.trim_start();
+                let after = after.trim_start().trim_end_matches("*/").trim();
                 if after.is_empty() {
                     all_disabled = false;
                     disabled_rules.clear();
                 } else if let Some(stripped) = after.strip_prefix('=') {
-                    let rule = stripped.trim().to_string();
-                    if !all_disabled {
-                        disabled_rules.remove(&rule);
+                    for rule in stripped.split(',').map(|s| s.trim()) {
+                        let rule = rule.to_string();
+                        if !all_disabled {
+                            disabled_rules.remove(&rule);
+                        }
                     }
                 }
             }
@@ -468,13 +634,13 @@ impl Linter {
         let first_line = content.lines().next()?;
         let pos = first_line.find("lint: ignore-file")?;
         let after = &first_line[pos + "lint: ignore-file".len()..];
-        let after = after.trim_start();
+        let after = after.trim_start().trim_end_matches("*/").trim();
         if after.is_empty() {
             return Some(Vec::new());
         }
         if let Some(stripped) = after.strip_prefix('=') {
-            let rule = stripped.trim().to_string();
-            return Some(vec![rule]);
+            let rules: Vec<String> = stripped.split(',').map(|s| s.trim().to_string()).collect();
+            return Some(rules);
         }
         None
     }
@@ -486,34 +652,41 @@ impl Linter {
         for (i, line) in lines.iter().enumerate() {
             if let Some(pos) = line.find("lint: ignore") {
                 let after = &line[pos + "lint: ignore".len()..];
-                let after = after.trim_start();
-                let rule = if after.is_empty() {
-                    None
+                let after = after.trim_start().trim_end_matches("*/").trim();
+                if after.is_empty() {
+                    directives.push(SuppressionDirective {
+                        start_line: i,
+                        end_line: i + 1,
+                        rule: None,
+                        is_block: false,
+                    });
                 } else if let Some(stripped) = after.strip_prefix('=') {
-                    Some(stripped.trim().to_string())
+                    for rule in stripped.split(',').map(|s| s.trim()) {
+                        directives.push(SuppressionDirective {
+                            start_line: i,
+                            end_line: i + 1,
+                            rule: Some(rule.to_string()),
+                            is_block: false,
+                        });
+                    }
                 } else {
                     continue;
-                };
-                directives.push(SuppressionDirective {
-                    start_line: i,
-                    end_line: i + 1,
-                    rule,
-                    is_block: false,
-                });
+                }
             } else if let Some(pos) = line.find("lint: disable") {
                 let after = &line[pos + "lint: disable".len()..];
-                let after = after.trim_start();
-                let rule = if after.is_empty() {
-                    None
+                let after = after.trim_start().trim_end_matches("*/").trim();
+                if after.is_empty() {
+                    block_stack.push((i, None));
                 } else if let Some(stripped) = after.strip_prefix('=') {
-                    Some(stripped.trim().to_string())
+                    for rule in stripped.split(',').map(|s| s.trim()) {
+                        block_stack.push((i, Some(rule.to_string())));
+                    }
                 } else {
                     continue;
-                };
-                block_stack.push((i, rule));
+                }
             } else if let Some(pos) = line.find("lint: enable") {
                 let after = &line[pos + "lint: enable".len()..];
-                let after = after.trim_start();
+                let after = after.trim_start().trim_end_matches("*/").trim();
                 if after.is_empty() {
                     while let Some((start, _)) = block_stack.pop() {
                         directives.push(SuppressionDirective {
@@ -524,15 +697,19 @@ impl Linter {
                         });
                     }
                 } else if let Some(stripped) = after.strip_prefix('=') {
-                    let rule_name = stripped.trim().to_string();
-                    if let Some(pos) = block_stack.iter().rposition(|(_, r)| r.as_ref() == Some(&rule_name)) {
-                        let (start, _) = block_stack.remove(pos);
-                        directives.push(SuppressionDirective {
-                            start_line: start,
-                            end_line: i,
-                            rule: Some(rule_name),
-                            is_block: true,
-                        });
+                    for rule_name in stripped.split(',').map(|s| s.trim()) {
+                        if let Some(pos) = block_stack
+                            .iter()
+                            .rposition(|(_, r)| r.as_ref().is_some_and(|r| r == rule_name))
+                        {
+                            let (start, _) = block_stack.remove(pos);
+                            directives.push(SuppressionDirective {
+                                start_line: start,
+                                end_line: i,
+                                rule: Some(rule_name.to_string()),
+                                is_block: true,
+                            });
+                        }
                     }
                 }
             }
@@ -557,11 +734,13 @@ impl Linter {
                 configured_exts.iter().any(|ext| ext == ext_str.as_ref())
             } else {
                 let supported_extensions = [
-                    "rs", "js", "ts", "jsx", "tsx", "py", "java", "go", "c", "cpp", "h", "hpp", "rb",
-                    "php", "swift", "kt", "dart", "cs", "sh", "bash", "sql", "lua", "scala", "r", "zig",
-                    "html", "htm", "css", "scss", "sass",
+                    "rs", "js", "ts", "jsx", "tsx", "py", "java", "go", "c", "cpp", "h", "hpp",
+                    "rb", "php", "swift", "kt", "dart", "cs", "sh", "bash", "sql", "lua", "scala",
+                    "r", "zig", "html", "htm", "css", "scss", "sass",
                 ];
-                supported_extensions.iter().any(|ext| *ext == ext_str.as_ref())
+                supported_extensions
+                    .iter()
+                    .any(|ext| *ext == ext_str.as_ref())
             }
         } else {
             false
@@ -650,10 +829,7 @@ mod tests {
     #[test]
     fn test_is_ignored_exact_match() {
         let config = ConfigBuilder::new()
-            .ignore_patterns(vec![
-                "node_modules".to_string(),
-                ".git".to_string(),
-            ])
+            .ignore_patterns(vec!["node_modules".to_string(), ".git".to_string()])
             .build();
         let linter = Linter::new(&config);
 
@@ -777,9 +953,18 @@ mod tests {
 
     #[test]
     fn test_is_line_suppressed_unit() {
-        assert!(Linter::is_line_suppressed("let x = 5; // lint: ignore=line-length", "line-length"));
-        assert!(!Linter::is_line_suppressed("let x = 5; // lint: ignore=trailing-whitespace", "line-length"));
-        assert!(Linter::is_line_suppressed("let x = 5; // lint: ignore", "any-rule"));
+        assert!(Linter::is_line_suppressed(
+            "let x = 5; // lint: ignore=line-length",
+            "line-length"
+        ));
+        assert!(!Linter::is_line_suppressed(
+            "let x = 5; // lint: ignore=trailing-whitespace",
+            "line-length"
+        ));
+        assert!(Linter::is_line_suppressed(
+            "let x = 5; // lint: ignore",
+            "any-rule"
+        ));
         assert!(!Linter::is_line_suppressed("let x = 5;", "line-length"));
     }
 
@@ -835,8 +1020,8 @@ mod tests {
 
     #[test]
     fn test_severity_override_changes_severity() -> anyhow::Result<()> {
-        use std::collections::HashMap;
         use crate::output::Severity;
+        use std::collections::HashMap;
         let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
         let content = "let x = 5;   \n";
         file.write_all(content.as_bytes())?;
@@ -862,8 +1047,8 @@ mod tests {
 
     #[test]
     fn test_severity_override_only_affects_matching_rule() -> anyhow::Result<()> {
-        use std::collections::HashMap;
         use crate::output::Severity;
+        use std::collections::HashMap;
         let mut file = tempfile::Builder::new().suffix(".rs").tempfile()?;
         let content = "let x = 5;   \n";
         file.write_all(content.as_bytes())?;
@@ -955,7 +1140,10 @@ mod tests {
             .iter()
             .filter(|m| m.rule == "trailing-whitespace")
             .collect();
-        assert!(tw_messages.is_empty(), "trailing-whitespace should be fully suppressed");
+        assert!(
+            tw_messages.is_empty(),
+            "trailing-whitespace should be fully suppressed"
+        );
 
         Ok(())
     }
@@ -989,13 +1177,21 @@ mod tests {
 
         let config = ConfigBuilder::new()
             .paths(vec![file.path().to_path_buf()])
-            .enabled_rules(vec!["trailing-whitespace".to_string(), "no-todo".to_string()])
+            .enabled_rules(vec![
+                "trailing-whitespace".to_string(),
+                "no-todo".to_string(),
+            ])
             .build();
 
         let linter = Linter::new(&config);
         let result = linter.lint_file(file.path())?;
 
-        assert!(result.messages.iter().all(|m| m.rule != "trailing-whitespace"));
+        assert!(
+            result
+                .messages
+                .iter()
+                .all(|m| m.rule != "trailing-whitespace")
+        );
         assert!(result.messages.iter().any(|m| m.rule == "no-todo"));
 
         Ok(())
@@ -1030,7 +1226,10 @@ mod tests {
 
         let config = ConfigBuilder::new()
             .paths(vec![file.path().to_path_buf()])
-            .enabled_rules(vec!["trailing-whitespace".to_string(), "unused-suppression".to_string()])
+            .enabled_rules(vec![
+                "trailing-whitespace".to_string(),
+                "unused-suppression".to_string(),
+            ])
             .build();
 
         let linter = Linter::new(&config);
@@ -1052,7 +1251,10 @@ mod tests {
 
         let config = ConfigBuilder::new()
             .paths(vec![file.path().to_path_buf()])
-            .enabled_rules(vec!["trailing-whitespace".to_string(), "unused-suppression".to_string()])
+            .enabled_rules(vec![
+                "trailing-whitespace".to_string(),
+                "unused-suppression".to_string(),
+            ])
             .build();
 
         let linter = Linter::new(&config);
@@ -1072,7 +1274,10 @@ mod tests {
 
         let config = ConfigBuilder::new()
             .paths(vec![file.path().to_path_buf()])
-            .enabled_rules(vec!["trailing-whitespace".to_string(), "unused-suppression".to_string()])
+            .enabled_rules(vec![
+                "trailing-whitespace".to_string(),
+                "unused-suppression".to_string(),
+            ])
             .build();
 
         let linter = Linter::new(&config);
@@ -1093,7 +1298,10 @@ mod tests {
 
         let config = ConfigBuilder::new()
             .paths(vec![file.path().to_path_buf()])
-            .enabled_rules(vec!["trailing-whitespace".to_string(), "unused-suppression".to_string()])
+            .enabled_rules(vec![
+                "trailing-whitespace".to_string(),
+                "unused-suppression".to_string(),
+            ])
             .build();
 
         let linter = Linter::new(&config);
@@ -1131,8 +1339,16 @@ mod tests {
 
         std::env::set_current_dir(original_dir)?;
 
-        assert!(files.iter().any(|p| p.file_name() == Some(std::ffi::OsStr::new("kept.rs"))));
-        assert!(!files.iter().any(|p| p.file_name() == Some(std::ffi::OsStr::new("ignored.rs"))));
+        assert!(
+            files
+                .iter()
+                .any(|p| p.file_name() == Some(std::ffi::OsStr::new("kept.rs")))
+        );
+        assert!(
+            !files
+                .iter()
+                .any(|p| p.file_name() == Some(std::ffi::OsStr::new("ignored.rs")))
+        );
 
         Ok(())
     }
@@ -1144,10 +1360,13 @@ mod tests {
             .build();
         let linter = Linter::new(&config);
         let temp_path = Path::new("/tmp/lint_stdin_12345.rs");
-        assert_eq!(linter.effective_path(temp_path), Path::new("src/main.rs"));
+        assert_eq!(
+            linter.effective_path(temp_path, &config),
+            Path::new("src/main.rs")
+        );
 
         let normal_path = Path::new("/tmp/other.rs");
-        assert_eq!(linter.effective_path(normal_path), normal_path);
+        assert_eq!(linter.effective_path(normal_path, &config), normal_path);
     }
 
     #[test]
@@ -1157,7 +1376,10 @@ mod tests {
         std::fs::write(&stdin_temp, "let x = 5;   \n")?;
 
         let mut per_file_ignores = HashMap::new();
-        per_file_ignores.insert("src/**/*.rs".to_string(), vec!["trailing-whitespace".to_string()]);
+        per_file_ignores.insert(
+            "src/**/*.rs".to_string(),
+            vec!["trailing-whitespace".to_string()],
+        );
 
         let config = ConfigBuilder::new()
             .paths(vec![stdin_temp.clone()])
@@ -1169,9 +1391,270 @@ mod tests {
         let linter = Linter::new(&config);
         let result = linter.lint_file(&stdin_temp)?;
 
-        assert!(result.messages.is_empty(), "per-file ignores should match stdin_file_path");
+        assert!(
+            result.messages.is_empty(),
+            "per-file ignores should match stdin_file_path"
+        );
         assert_eq!(result.file_path, PathBuf::from("src/main.rs"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_per_dir_config_overrides_max_line_length() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+
+        // Root file with a line of ~110 chars (> default 100)
+        let root_file = temp_dir.path().join("root.rs");
+        std::fs::write(
+            &root_file,
+            "let x = \"this is an extremely long string that definitely exceeds the default one hundred character limit\";\n",
+        )?;
+
+        // Subdirectory with a per-directory config that sets max_line_length to 200
+        let sub_dir = temp_dir.path().join("src");
+        std::fs::create_dir(&sub_dir)?;
+        let sub_file = sub_dir.join("sub.rs");
+        std::fs::write(
+            &sub_file,
+            "let x = \"this is an extremely long string that definitely exceeds the default one hundred character limit\";\n",
+        )?;
+
+        let base_config = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().to_path_buf()])
+            .enabled_rules(vec!["line-length".to_string()])
+            .build();
+
+        let mut per_dir = std::collections::HashMap::new();
+        let sub_cfg = ConfigBuilder::new().max_line_length(Some(200)).build();
+        per_dir.insert(sub_dir, sub_cfg);
+
+        let linter = Linter::new_with_per_dir_configs(&base_config, None, per_dir);
+        let results = linter.run()?;
+
+        let root_result = results
+            .iter()
+            .find(|r| r.file_path.ends_with("root.rs"))
+            .unwrap();
+        let sub_result = results
+            .iter()
+            .find(|r| r.file_path.ends_with("sub.rs"))
+            .unwrap();
+
+        // Root file should have line-length violation (> 100)
+        assert!(root_result.messages.iter().any(|m| m.rule == "line-length"));
+        // Sub file should NOT have violation because per-dir config sets max to 200
+        assert!(!sub_result.messages.iter().any(|m| m.rule == "line-length"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_per_dir_config_overrides_severity() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        // Empty root file triggers no-empty-file
+        let root_file = temp_dir.path().join("root.rs");
+        std::fs::write(&root_file, "")?;
+
+        let sub_dir = temp_dir.path().join("src");
+        std::fs::create_dir(&sub_dir)?;
+        // Empty sub file triggers no-empty-file
+        let sub_file = sub_dir.join("sub.rs");
+        std::fs::write(&sub_file, "")?;
+
+        let base_config = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().to_path_buf()])
+            .enabled_rules(vec!["no-empty-file".to_string()])
+            .build();
+        // Base: no-empty-file is Info by default
+
+        let mut per_dir = std::collections::HashMap::new();
+        let mut sub_cfg = ConfigBuilder::new()
+            .enabled_rules(vec!["no-empty-file".to_string()])
+            .build();
+        sub_cfg
+            .severity_overrides
+            .insert("no-empty-file".to_string(), Severity::Error);
+        per_dir.insert(sub_dir.clone(), sub_cfg);
+
+        let linter = Linter::new_with_per_dir_configs(&base_config, None, per_dir);
+        let results = linter.run()?;
+
+        let root_result = results
+            .iter()
+            .find(|r| r.file_path.ends_with("root.rs"))
+            .unwrap();
+        let sub_result = results
+            .iter()
+            .find(|r| r.file_path.ends_with("sub.rs"))
+            .unwrap();
+
+        // Root file: no-empty-file should be Warning (default)
+        assert!(
+            root_result
+                .messages
+                .iter()
+                .any(|m| m.rule == "no-empty-file" && m.severity == Severity::Warning)
+        );
+        // Sub file: per-dir config overrides severity to Error
+        assert!(
+            sub_result
+                .messages
+                .iter()
+                .any(|m| m.rule == "no-empty-file" && m.severity == Severity::Error)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_suppression_by_code_works() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "let x = 5;   // lint: ignore=W002\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+        assert!(
+            result.messages.is_empty(),
+            "W002 should suppress trailing-whitespace"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_suppression_by_code_works() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "// lint: disable=W002\nlet x = 5;   \n// lint: enable=W002\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+        assert!(
+            result.messages.is_empty(),
+            "W002 block suppression should work"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_level_ignore_by_code_works() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "// lint: ignore-file=W002\nlet x = 5;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+        assert!(
+            result.messages.is_empty(),
+            "W002 file-level ignore should work"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_comment_inline_suppression() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "let x = 5;   /* lint: ignore=W002 */\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+        assert!(
+            result.messages.is_empty(),
+            "/* lint: ignore=W002 */ should suppress trailing-whitespace"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_comment_file_level_ignore() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "/* lint: ignore-file=W002 */\nlet x = 5;   \n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+        assert!(
+            result.messages.is_empty(),
+            "/* lint: ignore-file=W002 */ should suppress trailing-whitespace"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_block_comment_block_suppression() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "/* lint: disable=W002 */\nlet x = 5;   \n/* lint: enable=W002 */\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+        assert!(
+            result.messages.is_empty(),
+            "/* lint: disable=W002 */ block suppression should work"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_inline_ignore_patterns() -> anyhow::Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let content = "let x = 5;   // lint: ignore=W001,W002\n";
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![file.path().to_path_buf()])
+            .enabled_rules(vec![
+                "line-length".to_string(),
+                "trailing-whitespace".to_string(),
+            ])
+            .max_line_length(Some(5))
+            .build();
+
+        let linter = Linter::new(&config);
+        let result = linter.lint_file(file.path())?;
+        assert!(
+            result.messages.is_empty(),
+            "W001,W002 should suppress both line-length and trailing-whitespace"
+        );
         Ok(())
     }
 }

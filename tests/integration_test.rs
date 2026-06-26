@@ -178,7 +178,12 @@ fn test_trailing_whitespace_exact_message() -> anyhow::Result<()> {
     assert_eq!(msg.severity, lint::Severity::Warning);
     assert_eq!(msg.rule, "trailing-whitespace");
     assert_eq!(msg.message, "Trailing whitespace detected");
-    assert!(msg.suggestion.as_ref().unwrap().contains("Delete spaces/tabs"));
+    assert!(
+        msg.suggestion
+            .as_ref()
+            .unwrap()
+            .contains("Delete spaces/tabs")
+    );
     assert!(msg.fix.is_some());
     assert_eq!(msg.fix.as_ref().unwrap().replacement, "let x = 5;");
 
