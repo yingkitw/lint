@@ -40,6 +40,9 @@ impl Linter {
             }) as Box<dyn Rule>,
             Box::new(crate::rules::TrailingWhitespaceRule) as Box<dyn Rule>,
             Box::new(crate::rules::NoTodoRule) as Box<dyn Rule>,
+            Box::new(crate::rules::NoEmptyFileRule) as Box<dyn Rule>,
+            Box::new(crate::rules::NoConsecutiveEmptyLinesRule) as Box<dyn Rule>,
+            Box::new(crate::rules::NoTabsRule) as Box<dyn Rule>,
         ];
 
         for rule in rules {

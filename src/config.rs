@@ -28,6 +28,7 @@ pub enum OutputFormat {
     Markdown,
     Github,
     Sarif,
+    Junit,
 }
 
 pub struct ConfigBuilder {

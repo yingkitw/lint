@@ -85,9 +85,35 @@
   - **Goal**: `lint lint . --statistics` prints a sorted table of rule names and their violation counts
   - **Status**: Added `statistics: bool` to `Commands::Lint`. `run_lint_and_print` collects per-rule counts from all results, sorts by count descending, and prints a summary table. CLI parsing test added.
 
-- [ ] **Rule categories / severity-based grouping**
+- [x] **`--show-fixes` CLI flag**
+  - Ruff supports `--show-fixes` to list files that were modified by `--fix`
+  - **Goal**: `lint lint . --fix --show-fixes` prints the list of files that were fixed after linting
+  - **Status**: Added `show_fixes: bool` to `Commands::Lint`. After applying fixes, `run_lint_and_print` tracks fixed files and prints them if `show_fixes` is true. CLI parsing test added.
+
+- [x] **`--exclude` CLI flag**
+  - Ruff and ESLint support `--exclude` to skip files/patterns at CLI level
+  - **Goal**: `lint lint . --exclude vendor --exclude "*.min.js"` skips matching files
+  - **Status**: Added `exclude: Option<Vec<String>>` to `Commands::Lint`. Patterns merged into `config.ignore_patterns` before linting. CLI parsing test added.
+
+- [x] **JUnit XML output format**
+  - Ruff supports JUnit XML output for CI integration (Jenkins, Azure DevOps, GitLab)
+  - **Goal**: `lint lint . --output junit` produces JUnit XML for test result ingestion
+  - **Status**: Added `Junit` variant to `OutputFormat`. `render_junit()` generates valid JUnit XML with `<testsuite>` and `<testcase>` elements. XML escaping via `escape_xml()`. CLI parsing test added.
+
+- [x] **Additional generic rules**
+  - Current generic rules are limited (line-length, trailing-whitespace, no-todo)
+  - **Goal**: Add `no-empty-file`, `no-consecutive-empty-lines`, `no-tabs` rules
+  - **Status**: Added `NoEmptyFileRule`, `NoConsecutiveEmptyLinesRule`, and `NoTabsRule` to `rules.rs`. `NoTabsRule` includes auto-fix (replace tabs with 4 spaces). All wired into `linter.rs` available rules. Unit tests added.
+
+- [x] **`--show-settings` CLI flag**
+  - Ruff supports `--show-settings` to print the effective configuration
+  - **Goal**: `lint lint . --show-settings` prints merged config as JSON and exits
+  - **Status**: Added `show_settings: bool` to `Commands::Lint`. After config merging, prints config as pretty JSON and returns `Ok(())`. CLI parsing test added.
+
+- [x] **Rule categories / severity-based grouping**
   - Ruff organizes rules into categories (E = errors, W = warnings, F = Pyflakes, etc.)
   - **Goal**: Rules have category prefixes (e.g., `style:line-length`, `bug:no-todo`)
+  - **Status**: Added `category(&self) -> &str` to `Rule` and `LanguageRule` traits with default implementations. `LineLengthRule`, `TrailingWhitespaceRule`, `SemicolonRule` → `style`. `NoTodoRule` and all language rules → `correctness`. `list_rules()` now shows `[category]` prefix. Unit tests added for both `Rule` and `LanguageRule` categories.
 
 ## Brainstorming (from competitive intelligence round 7)
 
@@ -198,9 +224,17 @@
 
 ## Done
 
-- [x] Comprehensive unit and integration test coverage (114 lib + 35 bin + 18 advanced + 10 basic = 177 tests)
+- [x] Comprehensive unit and integration test coverage (125 lib + 39 bin + 18 advanced + 10 basic = 192 tests)
 - [x] Source context in text output (offending line + caret underline)
 - [x] `--statistics` CLI flag (per-rule violation counts)
+- [x] `--show-fixes` CLI flag (list files modified by --fix)
+- [x] `--exclude` CLI flag (exclude file patterns at CLI level)
+- [x] JUnit XML output format (CI integration)
+- [x] Additional generic rules (`no-empty-file`, `no-consecutive-empty-lines`, `no-tabs`)
+- [x] `--show-settings` CLI flag (print effective config as JSON)
+- [x] Rule categories (`style`, `correctness`, `custom`)
+- [x] File count in text summary ("Summary: X errors, Y warnings, Z infos in N files")
+- [x] Fix indicator `[*]` in text output for fixable issues
 - [x] MCP server implementation
 - [x] Multi-language rule support
 - [x] `--fix` auto-fix capability (trailing whitespace)

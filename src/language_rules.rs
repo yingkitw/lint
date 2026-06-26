@@ -1048,6 +1048,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_language_rule_categories() {
+        assert_eq!(ConsoleLogRule.category(), "correctness");
+        assert_eq!(VarUsageRule.category(), "correctness");
+        assert_eq!(PythonPrintRule.category(), "correctness");
+        assert_eq!(SemicolonRule.category(), "style");
+    }
+
+    #[test]
     fn test_console_log_rule_js() {
         let rule = ConsoleLogRule;
         let content = "console.log('hello');";

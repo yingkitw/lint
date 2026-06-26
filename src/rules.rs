@@ -186,6 +186,107 @@ impl Rule for NoTodoRule {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct NoEmptyFileRule;
+
+impl Rule for NoEmptyFileRule {
+    fn name(&self) -> &str {
+        "no-empty-file"
+    }
+
+    fn category(&self) -> &str {
+        "style"
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            vec![LintMessage::new(
+                1,
+                1,
+                Severity::Warning,
+                "Empty file detected".to_string(),
+                self.name().to_string(),
+                Some("Add content or delete the file if it is unused.".to_string()),
+            )]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NoConsecutiveEmptyLinesRule;
+
+impl Rule for NoConsecutiveEmptyLinesRule {
+    fn name(&self) -> &str {
+        "no-consecutive-empty-lines"
+    }
+
+    fn category(&self) -> &str {
+        "style"
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let mut messages = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut prev_empty = false;
+
+        for (i, line) in lines.iter().enumerate() {
+            let is_empty = line.trim().is_empty();
+            if is_empty && prev_empty {
+                messages.push(LintMessage::new(
+                    i + 1,
+                    1,
+                    Severity::Warning,
+                    "Consecutive empty lines detected".to_string(),
+                    self.name().to_string(),
+                    Some("Remove extra blank lines; files should not contain more than one consecutive empty line.".to_string()),
+                ));
+            }
+            prev_empty = is_empty;
+        }
+
+        messages
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NoTabsRule;
+
+impl Rule for NoTabsRule {
+    fn name(&self) -> &str {
+        "no-tabs"
+    }
+
+    fn category(&self) -> &str {
+        "style"
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let mut messages = Vec::new();
+
+        for (line_num, line) in content.lines().enumerate() {
+            if let Some(col) = line.find('\t') {
+                let fixed = line.replace('\t', "    ");
+                messages.push(
+                    LintMessage::new(
+                        line_num + 1,
+                        col + 1,
+                        Severity::Warning,
+                        "Tab character detected; use spaces for indentation".to_string(),
+                        self.name().to_string(),
+                        Some("Replace tabs with spaces. Most editors support 'Insert spaces instead of tabs' in settings.".to_string()),
+                    )
+                    .with_fix(fixed),
+                );
+            }
+        }
+
+        messages
+    }
+}
+
 pub struct RuleSet {
     pub rules: Vec<Box<dyn Rule>>,
 }
@@ -215,6 +316,16 @@ impl Default for RuleSet {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn test_rule_categories() {
+        let line_length = LineLengthRule { max_length: 100 };
+        let trailing_ws = TrailingWhitespaceRule;
+        let no_todo = NoTodoRule;
+        assert_eq!(line_length.category(), "style");
+        assert_eq!(trailing_ws.category(), "style");
+        assert_eq!(no_todo.category(), "correctness");
+    }
 
     #[test]
     fn test_line_length_rule_short_line() {
@@ -433,5 +544,82 @@ mod tests {
             result.file_content.len() <= original_len,
             "Fix should not increase file size"
         );
+    }
+
+    #[test]
+    fn test_no_empty_file_rule_empty() {
+        let rule = NoEmptyFileRule;
+        let messages = rule.check("", Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].severity, Severity::Warning);
+        assert!(messages[0].message.contains("Empty file"));
+    }
+
+    #[test]
+    fn test_no_empty_file_rule_whitespace_only() {
+        let rule = NoEmptyFileRule;
+        let messages = rule.check("   \n\n  ", Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.contains("Empty file"));
+    }
+
+    #[test]
+    fn test_no_empty_file_rule_non_empty() {
+        let rule = NoEmptyFileRule;
+        let messages = rule.check("let x = 5;", Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_no_consecutive_empty_lines_rule_clean() {
+        let rule = NoConsecutiveEmptyLinesRule;
+        let content = "line one\n\nline two\nline three";
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_no_consecutive_empty_lines_rule_violation() {
+        let rule = NoConsecutiveEmptyLinesRule;
+        let content = "line one\n\n\nline two";
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].line, 3);
+        assert!(messages[0].message.contains("Consecutive empty lines"));
+    }
+
+    #[test]
+    fn test_no_consecutive_empty_lines_rule_multiple_violations() {
+        let rule = NoConsecutiveEmptyLinesRule;
+        let content = "a\n\n\n\nb\n\n\nc";
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn test_no_tabs_rule_clean() {
+        let rule = NoTabsRule;
+        let messages = rule.check("let x = 5;", Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_no_tabs_rule_violation() {
+        let rule = NoTabsRule;
+        let messages = rule.check("\tlet x = 5;", Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].line, 1);
+        assert_eq!(messages[0].column, 1);
+        assert!(messages[0].fix.is_some());
+        assert_eq!(messages[0].fix.as_ref().unwrap().replacement, "    let x = 5;");
+    }
+
+    #[test]
+    fn test_no_tabs_rule_multiple_tabs() {
+        let rule = NoTabsRule;
+        let content = "\t\tlet x = 5;";
+        let messages = rule.check(content, Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].fix.as_ref().unwrap().replacement, "        let x = 5;");
     }
 }

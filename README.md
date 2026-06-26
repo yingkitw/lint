@@ -75,11 +75,23 @@ lint lint . --output json --output-file results.json
 # Generate SARIF output for GitHub Advanced Security
 lint lint . --output sarif --output-file results.sarif.json
 
+# Generate JUnit XML for CI integration
+lint lint . --output junit --output-file results.junit.xml
+
 # Show violations without failing the build
 lint lint . --exit-zero
 
+# Show effective configuration after merging all sources
+lint lint . --show-settings
+
+# Enable specific rules
+lint lint . --select no-tabs --select no-consecutive-empty-lines
+
 # Show per-rule violation statistics
 lint lint . --statistics
+
+# Exclude specific paths or patterns
+lint lint . --exclude vendor --exclude "*.min.js"
 
 # Lint code from stdin (useful for editor integrations)
 echo 'let x = 5;   ' | lint lint --stdin --stdin-filename test.rs

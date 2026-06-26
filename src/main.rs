@@ -71,6 +71,15 @@ enum Commands {
 
         #[arg(long)]
         statistics: bool,
+
+        #[arg(long)]
+        show_fixes: bool,
+
+        #[arg(long, value_name = "PATTERN")]
+        exclude: Option<Vec<String>>,
+
+        #[arg(long)]
+        show_settings: bool,
     },
     ListRules,
     Version,
@@ -87,6 +96,7 @@ fn run_lint_and_print(
     output_file: Option<&PathBuf>,
     exit_zero: bool,
     statistics: bool,
+    show_fixes: bool,
 ) -> anyhow::Result<i32> {
     let cache_arc = cache.map(|c| std::sync::Arc::new(std::sync::Mutex::new(c.lock().unwrap().clone())));
     let mut results = if let Some(ref c) = cache_arc {
@@ -95,12 +105,14 @@ fn run_lint_and_print(
         lint::lint_files(config)?
     };
 
+    let mut fixed_files = Vec::new();
     if fix {
         let mut fixed_count = 0;
         for result in &mut results {
             if result.apply_fixes() {
                 std::fs::write(&result.file_path, &result.file_content)?;
                 fixed_count += 1;
+                fixed_files.push(result.file_path.display().to_string());
             }
         }
         if fixed_count > 0 {
@@ -115,6 +127,13 @@ fn run_lint_and_print(
         std::fs::write(path, output)?;
     } else {
         print_results(&results, output_format.clone(), quiet);
+    }
+
+    if show_fixes && !fixed_files.is_empty() && !quiet {
+        println!("\n{}", "Fixed files:".bold());
+        for file in fixed_files {
+            println!("  {}", file);
+        }
     }
 
     if statistics && !quiet {
@@ -253,6 +272,9 @@ fn main() -> anyhow::Result<()> {
             stdin_filename,
             exit_zero,
             statistics,
+            show_fixes,
+            exclude,
+            show_settings,
         } => {
             match color.as_deref() {
                 Some("never") | Some("no") => colored::control::set_override(false),
@@ -261,6 +283,8 @@ fn main() -> anyhow::Result<()> {
             }
             let mut config = if let Some(config_path) = &cli.config {
                 load_config_file(config_path)?
+            } else if let Some(config_path) = find_config_file() {
+                load_config_file(&config_path)?
             } else {
                 ConfigBuilder::new().build()
             };
@@ -291,6 +315,10 @@ fn main() -> anyhow::Result<()> {
                 config.paths = expand_globs(paths);
             }
 
+            if let Some(exclude_patterns) = exclude {
+                config.ignore_patterns.extend(exclude_patterns);
+            }
+
             if let Some(length) = max_line_length {
                 config.max_line_length = Some(length);
             }
@@ -310,6 +338,11 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
+            if show_settings {
+                println!("{}", serde_json::to_string_pretty(&config)?);
+                return Ok(());
+            }
+
             if print_files {
                 let linter = lint::Linter::new(&config);
                 for path in linter.list_files() {
@@ -323,6 +356,7 @@ fn main() -> anyhow::Result<()> {
                 Some("markdown") => OutputFormat::Markdown,
                 Some("github") => OutputFormat::Github,
                 Some("sarif") => OutputFormat::Sarif,
+                Some("junit") => OutputFormat::Junit,
                 _ => config.output_format.clone(),
             };
             config.output_format = output_format.clone();
@@ -339,7 +373,7 @@ fn main() -> anyhow::Result<()> {
 
             if watch {
                 println!("Watching for changes... Press Ctrl+C to stop.");
-                run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics)?;
+                run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes)?;
 
                 let (tx, rx) = std::sync::mpsc::channel();
                 let mut watcher = notify::recommended_watcher(move |res| {
@@ -359,11 +393,11 @@ fn main() -> anyhow::Result<()> {
                 for event in rx {
                     if event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove() {
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics)?;
+                        run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes)?;
                     }
                 }
             } else {
-                let exit_code = run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics)?;
+                let exit_code = run_lint_and_print(&config, fix, &output_format, cache.as_ref(), quiet, max_warnings, output_file.as_ref(), exit_zero, statistics, show_fixes)?;
                 if exit_code != 0 {
                     std::process::exit(exit_code);
                 }
@@ -485,6 +519,63 @@ fn render_sarif(results: &[lint::LintResult]) -> String {
     serde_json::to_string_pretty(&doc).unwrap()
 }
 
+fn render_junit(results: &[lint::LintResult]) -> String {
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str("<testsuites>\n");
+
+    let total_tests = results.len();
+    let total_failures: usize = results.iter().map(|r| r.messages.len()).sum();
+
+    out.push_str(&format!(
+        "  <testsuite name=\"lint\" tests=\"{}\" failures=\"{}\" errors=\"0\">\n",
+        total_tests, total_failures
+    ));
+
+    for result in results {
+        let file = result.file_path.to_string_lossy();
+        out.push_str(&format!(
+            "    <testcase name=\"{}\" classname=\"{}\" />\n",
+            escape_xml(&file),
+            escape_xml(&file)
+        ));
+        for msg in &result.messages {
+            out.push_str(&format!(
+                "    <testcase name=\"{}\" classname=\"{}\">\n",
+                escape_xml(&msg.rule),
+                escape_xml(&file)
+            ));
+            out.push_str(&format!(
+                "      <failure message=\"{}\" type=\"{}\">\n",
+                escape_xml(&msg.message),
+                escape_xml(&msg.rule)
+            ));
+            out.push_str(&format!(
+                "        {}:{}:{} - {} [{}]\n",
+                escape_xml(&file),
+                msg.line,
+                msg.column,
+                escape_xml(&msg.message),
+                escape_xml(&msg.rule)
+            ));
+            out.push_str("      </failure>\n");
+            out.push_str("    </testcase>\n");
+        }
+    }
+
+    out.push_str("  </testsuite>\n");
+    out.push_str("</testsuites>\n");
+    out
+}
+
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: bool) -> String {
     match format {
         OutputFormat::Json => {
@@ -545,6 +636,7 @@ fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: boo
             }
         }
         OutputFormat::Sarif => render_sarif(results),
+        OutputFormat::Junit => render_junit(results),
         OutputFormat::Text => {
             let mut out = String::new();
             let mut total_errors = 0;
@@ -580,10 +672,12 @@ fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: boo
                             }
                         };
 
+                        let fix_indicator = if msg.fix.is_some() { "[*] " } else { "" };
                         out.push_str(&format!(
-                            "  {}:{} {}: {}\n",
+                            "  {}:{} {}{}: {}\n",
                             msg.line,
                             msg.column,
+                            fix_indicator.dimmed(),
                             prefix.color(color),
                             msg.message
                         ));
@@ -604,9 +698,10 @@ fn render_results(results: &[lint::LintResult], format: OutputFormat, quiet: boo
             }
 
             if !quiet {
+                let file_count = results.len();
                 let summary = format!(
-                    "Summary: {} errors, {} warnings, {} infos",
-                    total_errors, total_warnings, total_infos
+                    "Summary: {} errors, {} warnings, {} infos in {} files",
+                    total_errors, total_warnings, total_infos, file_count
                 );
                 out.push_str(&format!("{}\n", summary.bold()));
             }
@@ -619,11 +714,28 @@ fn print_results(results: &[lint::LintResult], format: OutputFormat, quiet: bool
     print!("{}", render_results(results, format, quiet));
 }
 
+fn find_config_file() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let candidate = dir.join(".lint.json");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
 fn list_rules() {
     println!("Available rules (generic, apply to all files):");
-    println!("  [style]        line-length          - Lines exceeding max length (fix: break line)");
-    println!("  [style]        trailing-whitespace   - Trailing spaces/tabs (fix: remove)");
-    println!("  [correctness]  no-todo              - TODO/FIXME comments (fix: address or create issue)");
+    println!("  [style]        line-length                - Lines exceeding max length (fix: break line)");
+    println!("  [style]        trailing-whitespace         - Trailing spaces/tabs (fix: remove)");
+    println!("  [style]        no-empty-file             - Empty files with no content");
+    println!("  [style]        no-consecutive-empty-lines - Multiple consecutive blank lines");
+    println!("  [style]        no-tabs                    - Tab characters (fix: replace with 4 spaces)");
+    println!("  [correctness]  no-todo                    - TODO/FIXME comments (fix: address or create issue)");
     println!();
     println!("Language-specific rules (auto-applied by file extension):");
     println!("  JS/TS:    no-console-log, no-var");
@@ -724,6 +836,9 @@ mod tests {
                 stdin_filename,
                 exit_zero,
                 statistics,
+                show_fixes,
+                exclude,
+                show_settings,
             } => {
                 assert_eq!(paths, vec![PathBuf::from("src/")]);
                 assert_eq!(output, Some("json".to_string()));
@@ -743,6 +858,9 @@ mod tests {
                 assert_eq!(stdin_filename, None);
                 assert!(!exit_zero);
                 assert!(!statistics);
+                assert!(!show_fixes);
+                assert_eq!(exclude, None);
+                assert!(!show_settings);
             }
             _ => panic!("Expected Lint command"),
         }
@@ -922,6 +1040,17 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_output_junit_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--output", "junit"]);
+        match cli.command {
+            Commands::Lint { output, .. } => {
+                assert_eq!(output, Some("junit".to_string()));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
     fn test_cli_exit_zero_parsing() {
         let cli = Cli::parse_from(["lint", "lint", "src/", "--exit-zero"]);
         match cli.command {
@@ -941,6 +1070,58 @@ mod tests {
             }
             _ => panic!("Expected Lint command"),
         }
+    }
+
+    #[test]
+    fn test_cli_show_fixes_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--show-fixes"]);
+        match cli.command {
+            Commands::Lint { show_fixes, .. } => {
+                assert!(show_fixes);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_exclude_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--exclude", "vendor", "--exclude", "*.min.js"]);
+        match cli.command {
+            Commands::Lint { exclude, .. } => {
+                assert_eq!(exclude, Some(vec!["vendor".to_string(), "*.min.js".to_string()]));
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_show_settings_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--show-settings"]);
+        match cli.command {
+            Commands::Lint { show_settings, .. } => {
+                assert!(show_settings);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
+    fn test_find_config_file_discovers_lint_json() {
+        use std::io::Write;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join(".lint.json");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        file.write_all(b"{\"paths\": [\"src\"]}").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+        let found = find_config_file();
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert!(found.is_some());
+        let found_canon = found.unwrap().canonicalize().unwrap();
+        let expected_canon = config_path.canonicalize().unwrap();
+        assert_eq!(found_canon, expected_canon);
     }
 
     #[test]
