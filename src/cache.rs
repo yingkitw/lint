@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct CacheEntry {
     pub mtime: u64,
     pub size: u64,
+    pub content_hash: Option<String>,
     pub messages: Vec<LintMessage>,
 }
 
@@ -48,12 +49,35 @@ impl Cache {
         })
     }
 
+    pub fn get_by_hash(&self, path: &Path, hash: &str) -> Option<&Vec<LintMessage>> {
+        self.entries.get(path).and_then(|entry| {
+            if entry.content_hash.as_deref() == Some(hash) {
+                Some(&entry.messages)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn insert(&mut self, path: PathBuf, mtime: u64, size: u64, messages: Vec<LintMessage>) {
         self.entries.insert(
             path,
             CacheEntry {
                 mtime,
                 size,
+                content_hash: None,
+                messages,
+            },
+        );
+    }
+
+    pub fn insert_with_hash(&mut self, path: PathBuf, hash: String, messages: Vec<LintMessage>) {
+        self.entries.insert(
+            path,
+            CacheEntry {
+                mtime: 0,
+                size: 0,
+                content_hash: Some(hash),
                 messages,
             },
         );

@@ -24,14 +24,20 @@ Lint files or directories:
 # Lint current directory
 lint lint .
 
+# `check` is an alias for `lint`
+lint check .
+
 # Lint specific files
 lint lint src/main.rs src/lib.rs
 
 # Use glob patterns
 lint lint "src/**/*.rs"
 
-# Specify output format (text, json, markdown)
+# Specify output format (text, json, markdown, github, sarif, junit, concise, gitlab)
 lint lint . --output json
+
+# --output-format is an alias for --output
+lint lint . --output-format markdown
 
 # Set maximum line length
 lint lint . --max-line-length 120
@@ -42,14 +48,40 @@ lint lint . -r line-length -r trailing-whitespace
 # Use a configuration file
 lint lint . --config .lint.json
 
+# Config is auto-discovered: place .lint.json in your project root
+# and run lint without --config
+
+# .gitignore patterns are automatically respected when walking directories
+
 # Auto-fix fixable issues
 lint lint . --fix
+
+# Preview fixes without writing changes
+lint lint . --diff
+
+# Apply fixes but don't report remaining violations
+lint lint . --fix-only
+
+# Auto-add suppression comments to all violations
+lint lint . --add-noqa
+
+# Ignore all suppression comments (useful for auditing)
+lint lint . --ignore-suppressions
+
+# Ignore all ignore patterns (lint everything including node_modules)
+lint lint . --no-ignore
 
 # Watch for changes and re-lint
 lint lint . --watch
 
 # Use cache to skip unchanged files
 lint lint . --cache
+
+# Use a custom cache file location
+lint lint . --cache --cache-location /tmp/lint_cache.json
+
+# Use content-based caching (more accurate, slower)
+lint lint . --cache --cache-strategy content
 
 # Only show errors (suppress warnings and infos)
 lint lint . --quiet
@@ -66,6 +98,15 @@ lint lint . --select no-todo
 # Remove a rule from the default set
 lint lint . --ignore line-length
 
+# Enable the final-newline rule
+lint lint . --select final-newline
+
+# Enable the no-mixed-line-endings rule
+lint lint . --select no-mixed-line-endings
+
+# Enable all built-in rules
+lint lint . --select-all
+
 # List files that would be linted (without linting)
 lint lint . --print-files
 
@@ -77,6 +118,12 @@ lint lint . --output sarif --output-file results.sarif.json
 
 # Generate JUnit XML for CI integration
 lint lint . --output junit --output-file results.junit.xml
+
+# Generate GitLab Code Quality report
+lint lint . --output gitlab --output-file gl-code-quality-report.json
+
+# Concise one-line-per-violation output
+lint lint . --output concise
 
 # Show violations without failing the build
 lint lint . --exit-zero
@@ -93,14 +140,23 @@ lint lint . --statistics
 # Exclude specific paths or patterns
 lint lint . --exclude vendor --exclude "*.min.js"
 
+# Don't fail when a glob pattern doesn't match any files
+lint lint "nonexistent/**/*.rs" --no-error-on-unmatched-pattern
+
 # Lint code from stdin (useful for editor integrations)
 echo 'let x = 5;   ' | lint lint --stdin --stdin-filename test.rs
 
 # List available rules
 lint list-rules
 
+# Explain what a specific rule does
+lint explain line-length
+
 # Show version
 lint version
+
+# Generate a default configuration file
+lint init
 ```
 
 **Exit codes**: `0` if no issues found, `1` if any errors detected or if warnings exceed `--max-warnings`.

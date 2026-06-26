@@ -4,6 +4,7 @@ use crate::language_rules::LanguageRuleSet;
 use crate::output::{LintMessage, LintResult, Severity};
 use crate::rules::{Rule, RuleSet};
 use anyhow::{Context, Result};
+use ignore::gitignore::GitignoreBuilder;
 use ignore::Walk;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +25,7 @@ pub struct Linter {
     rule_set: RuleSet,
     language_rule_set: LanguageRuleSet,
     cache: Option<Arc<Mutex<Cache>>>,
+    gitignore: Option<ignore::gitignore::Gitignore>,
 }
 
 impl Linter {
@@ -32,6 +34,10 @@ impl Linter {
     }
 
     pub fn new_with_cache(config: &Config, cache: Option<Arc<Mutex<Cache>>>) -> Self {
+        let mut builder = GitignoreBuilder::new(".");
+        builder.add(".gitignore");
+        let gitignore = builder.build().ok();
+
         let mut rule_set = RuleSet::new();
 
         let rules = vec![
@@ -43,6 +49,8 @@ impl Linter {
             Box::new(crate::rules::NoEmptyFileRule) as Box<dyn Rule>,
             Box::new(crate::rules::NoConsecutiveEmptyLinesRule) as Box<dyn Rule>,
             Box::new(crate::rules::NoTabsRule) as Box<dyn Rule>,
+            Box::new(crate::rules::FinalNewlineRule) as Box<dyn Rule>,
+            Box::new(crate::rules::NoMixedLineEndingsRule) as Box<dyn Rule>,
         ];
 
         for rule in rules {
@@ -77,6 +85,7 @@ impl Linter {
             rule_set,
             language_rule_set: LanguageRuleSet::new(),
             cache,
+            gitignore,
         }
     }
 
@@ -165,10 +174,18 @@ impl Linter {
                 }
             }
         }
+        if let Some(ref gitignore) = self.gitignore {
+            let is_dir = path.is_dir();
+            if gitignore.matched(path, is_dir).is_ignore() {
+                return true;
+            }
+        }
         false
     }
 
     fn lint_file(&self, path: &Path) -> Result<LintResult> {
+        let use_content_hash = self.config.cache_strategy == crate::config::CacheStrategy::Content;
+
         let metadata = fs::metadata(path);
         let cache_key = metadata.as_ref().ok().and_then(|m| {
             let mtime = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
@@ -176,7 +193,8 @@ impl Linter {
             Some((mtime, size))
         });
 
-        if let Some((mtime, size)) = cache_key
+        if !use_content_hash
+            && let Some((mtime, size)) = cache_key
             && let Some(ref cache) = self.cache
         {
             let cache_guard = cache.lock().unwrap();
@@ -190,23 +208,54 @@ impl Linter {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read file: {}", path.display()))?;
 
+        if use_content_hash
+            && let Some(ref cache) = self.cache
+        {
+            let hash = format!("{:x}", {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                content.hash(&mut hasher);
+                hasher.finish()
+            });
+            let cache_guard = cache.lock().unwrap();
+            if let Some(cached_messages) = cache_guard.get_by_hash(path, &hash) {
+                let mut result = LintResult::new(path.to_path_buf(), content);
+                result.messages = cached_messages.clone();
+                return Ok(result);
+            }
+        }
+
         let mut result = LintResult::new(path.to_path_buf(), content);
 
         let file_level_ignored = Self::parse_file_level_ignore(&result.file_content);
         if file_level_ignored.clone().is_some_and(|rules| rules.is_empty()) {
-            if let Some((mtime, size)) = cache_key
-                && let Some(ref cache) = self.cache
-            {
+            if !use_content_hash {
+                if let Some((mtime, size)) = cache_key
+                    && let Some(ref cache) = self.cache
+                {
+                    let mut cache_guard = cache.lock().unwrap();
+                    cache_guard.insert(path.to_path_buf(), mtime, size, result.messages.clone());
+                }
+            } else if let Some(ref cache) = self.cache {
+                let hash = format!("{:x}", {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    result.file_content.hash(&mut hasher);
+                    hasher.finish()
+                });
                 let mut cache_guard = cache.lock().unwrap();
-                cache_guard.insert(path.to_path_buf(), mtime, size, result.messages.clone());
+                cache_guard.insert_with_hash(path.to_path_buf(), hash, result.messages.clone());
             }
             return Ok(result);
         }
 
         for rule in self.rule_set.get_rules() {
-            if file_level_ignored
-                .as_ref()
-                .is_some_and(|rules| rules.contains(&rule.name().to_string()))
+            if !self.config.ignore_suppressions
+                && file_level_ignored
+                    .as_ref()
+                    .is_some_and(|rules| rules.contains(&rule.name().to_string()))
             {
                 continue;
             }
@@ -218,60 +267,63 @@ impl Linter {
 
         let language_messages = self.language_rule_set.check(&result.file_content, path);
         for message in language_messages {
-            if file_level_ignored
-                .as_ref()
-                .is_some_and(|rules| rules.contains(&message.rule))
+            if !self.config.ignore_suppressions
+                && file_level_ignored
+                    .as_ref()
+                    .is_some_and(|rules| rules.contains(&message.rule))
             {
                 continue;
             }
             result.add_message(message);
         }
 
-        let lines: Vec<&str> = result.file_content.lines().collect();
-        let directives = Self::parse_suppression_directives(&lines);
-        let disabled_by_line = Self::parse_block_suppressions(&lines);
+        if !self.config.ignore_suppressions {
+            let lines: Vec<&str> = result.file_content.lines().collect();
+            let directives = Self::parse_suppression_directives(&lines);
+            let disabled_by_line = Self::parse_block_suppressions(&lines);
 
-        let raw_messages = result.messages.clone();
-        result.messages.retain(|msg| {
-            if let Some(line) = lines.get(msg.line.saturating_sub(1)) {
-                let inline_suppressed = Self::is_line_suppressed(line, &msg.rule);
-                let block_suppressed = disabled_by_line
-                    .get(&msg.line.saturating_sub(1))
-                    .is_some_and(|disabled| disabled.is_empty() || disabled.contains(&msg.rule));
-                !(inline_suppressed || block_suppressed)
-            } else {
-                true
-            }
-        });
-
-        if self.config.rule_set.enabled_rules.contains(&"unused-suppression".to_string()) {
-            for d in &directives {
-                let used = if d.is_block {
-                    raw_messages.iter().any(|msg| {
-                        let line_idx = msg.line.saturating_sub(1);
-                        line_idx >= d.start_line && line_idx < d.end_line
-                            && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
-                    })
+            let raw_messages = result.messages.clone();
+            result.messages.retain(|msg| {
+                if let Some(line) = lines.get(msg.line.saturating_sub(1)) {
+                    let inline_suppressed = Self::is_line_suppressed(line, &msg.rule);
+                    let block_suppressed = disabled_by_line
+                        .get(&msg.line.saturating_sub(1))
+                        .is_some_and(|disabled| disabled.is_empty() || disabled.contains(&msg.rule));
+                    !(inline_suppressed || block_suppressed)
                 } else {
-                    raw_messages.iter().any(|msg| {
-                        msg.line.saturating_sub(1) == d.start_line
-                            && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
-                    })
-                };
-                if !used {
-                    let message = if let Some(ref rule) = d.rule {
-                        format!("Unused suppression comment: `lint: ignore={}`", rule)
+                    true
+                }
+            });
+
+            if self.config.rule_set.enabled_rules.contains(&"unused-suppression".to_string()) {
+                for d in &directives {
+                    let used = if d.is_block {
+                        raw_messages.iter().any(|msg| {
+                            let line_idx = msg.line.saturating_sub(1);
+                            line_idx >= d.start_line && line_idx < d.end_line
+                                && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
+                        })
                     } else {
-                        "Unused suppression comment: `lint: ignore`".to_string()
+                        raw_messages.iter().any(|msg| {
+                            msg.line.saturating_sub(1) == d.start_line
+                                && (d.rule.is_none() || d.rule.as_ref().is_some_and(|r| r == &msg.rule))
+                        })
                     };
-                    result.add_message(LintMessage::new(
-                        d.start_line + 1,
-                        1,
-                        Severity::Warning,
-                        message,
-                        "unused-suppression".to_string(),
-                        Some("Remove this suppression comment or fix the underlying issue.".to_string()),
-                    ));
+                    if !used {
+                        let message = if let Some(ref rule) = d.rule {
+                            format!("Unused suppression comment: `lint: ignore={}`", rule)
+                        } else {
+                            "Unused suppression comment: `lint: ignore`".to_string()
+                        };
+                        result.add_message(LintMessage::new(
+                            d.start_line + 1,
+                            1,
+                            Severity::Warning,
+                            message,
+                            "unused-suppression".to_string(),
+                            Some("Remove this suppression comment or fix the underlying issue.".to_string()),
+                        ));
+                    }
                 }
             }
         }
@@ -299,11 +351,23 @@ impl Linter {
             }
         }
 
-        if let Some((mtime, size)) = cache_key
-            && let Some(ref cache) = self.cache
-        {
+        if !use_content_hash {
+            if let Some((mtime, size)) = cache_key
+                && let Some(ref cache) = self.cache
+            {
+                let mut cache_guard = cache.lock().unwrap();
+                cache_guard.insert(path.to_path_buf(), mtime, size, result.messages.clone());
+            }
+        } else if let Some(ref cache) = self.cache {
+            let hash = format!("{:x}", {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                result.file_content.hash(&mut hasher);
+                hasher.finish()
+            });
             let mut cache_guard = cache.lock().unwrap();
-            cache_guard.insert(path.to_path_buf(), mtime, size, result.messages.clone());
+            cache_guard.insert_with_hash(path.to_path_buf(), hash, result.messages.clone());
         }
 
         Ok(result)
@@ -999,6 +1063,39 @@ mod tests {
         let result = linter.lint_file(file.path())?;
 
         assert!(result.messages.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gitignore_respected() -> anyhow::Result<()> {
+        use std::io::Write;
+        let temp_dir = tempfile::tempdir()?;
+        let gitignore_path = temp_dir.path().join(".gitignore");
+        let mut gitignore = std::fs::File::create(&gitignore_path)?;
+        gitignore.write_all(b"ignored.rs\n")?;
+
+        let ignored_file = temp_dir.path().join("ignored.rs");
+        std::fs::write(&ignored_file, "let x = 5;   \n")?;
+
+        let kept_file = temp_dir.path().join("kept.rs");
+        std::fs::write(&kept_file, "let x = 5;   \n")?;
+
+        let original_dir = std::env::current_dir()?;
+        std::env::set_current_dir(temp_dir.path())?;
+
+        let config = ConfigBuilder::new()
+            .paths(vec![temp_dir.path().to_path_buf()])
+            .enabled_rules(vec!["trailing-whitespace".to_string()])
+            .build();
+
+        let linter = Linter::new(&config);
+        let files = linter.list_files();
+
+        std::env::set_current_dir(original_dir)?;
+
+        assert!(files.iter().any(|p| p.file_name() == Some(std::ffi::OsStr::new("kept.rs"))));
+        assert!(!files.iter().any(|p| p.file_name() == Some(std::ffi::OsStr::new("ignored.rs"))));
 
         Ok(())
     }

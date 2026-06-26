@@ -13,6 +13,14 @@ pub struct Config {
     pub per_file_ignores: HashMap<String, Vec<String>>,
     pub severity_overrides: HashMap<String, Severity>,
     pub extends: Option<String>,
+    pub ignore_suppressions: bool,
+    pub cache_strategy: CacheStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CacheStrategy {
+    Metadata,
+    Content,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +37,8 @@ pub enum OutputFormat {
     Github,
     Sarif,
     Junit,
+    Concise,
+    Gitlab,
 }
 
 pub struct ConfigBuilder {
@@ -40,6 +50,8 @@ pub struct ConfigBuilder {
     per_file_ignores: HashMap<String, Vec<String>>,
     severity_overrides: HashMap<String, Severity>,
     extends: Option<String>,
+    ignore_suppressions: bool,
+    cache_strategy: CacheStrategy,
 }
 
 impl ConfigBuilder {
@@ -53,13 +65,20 @@ impl ConfigBuilder {
             ],
             max_line_length: Some(100),
             rule_set: RuleSetConfig {
-                enabled_rules: vec!["line-length".to_string(), "trailing-whitespace".to_string()],
+                enabled_rules: vec![
+                    "line-length".to_string(),
+                    "trailing-whitespace".to_string(),
+                    "final-newline".to_string(),
+                    "no-mixed-line-endings".to_string(),
+                ],
                 custom_rules_path: None,
             },
             output_format: OutputFormat::Text,
             per_file_ignores: HashMap::new(),
             severity_overrides: HashMap::new(),
             extends: None,
+            ignore_suppressions: false,
+            cache_strategy: CacheStrategy::Metadata,
         }
     }
 
@@ -108,6 +127,16 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn ignore_suppressions(mut self, value: bool) -> Self {
+        self.ignore_suppressions = value;
+        self
+    }
+
+    pub fn cache_strategy(mut self, strategy: CacheStrategy) -> Self {
+        self.cache_strategy = strategy;
+        self
+    }
+
     pub fn build(self) -> Config {
         Config {
             paths: self.paths,
@@ -118,6 +147,8 @@ impl ConfigBuilder {
             per_file_ignores: self.per_file_ignores,
             severity_overrides: self.severity_overrides,
             extends: self.extends,
+            ignore_suppressions: self.ignore_suppressions,
+            cache_strategy: self.cache_strategy,
         }
     }
 }
@@ -208,6 +239,8 @@ mod tests {
             per_file_ignores,
             severity_overrides,
             extends: None,
+            ignore_suppressions: false,
+            cache_strategy: CacheStrategy::Metadata,
         };
 
         let json = serde_json::to_string(&config).unwrap();

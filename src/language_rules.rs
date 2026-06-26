@@ -7,6 +7,9 @@ pub trait LanguageRule: Send + Sync {
     fn category(&self) -> &str {
         "correctness"
     }
+    fn description(&self) -> &str {
+        ""
+    }
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
     fn supports_extension(&self, extension: &str) -> bool;
 }
@@ -1019,6 +1022,10 @@ impl LanguageRuleSet {
             Box::new(CssImportantRule),
         ];
         Self { rules }
+    }
+
+    pub fn get_rules(&self) -> &[Box<dyn LanguageRule>] {
+        &self.rules
     }
 
     pub fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage> {

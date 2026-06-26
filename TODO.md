@@ -110,6 +110,75 @@
   - **Goal**: `lint lint . --show-settings` prints merged config as JSON and exits
   - **Status**: Added `show_settings: bool` to `Commands::Lint`. After config merging, prints config as pretty JSON and returns `Ok(())`. CLI parsing test added.
 
+- [x] **Config file auto-discovery**
+  - Ruff, ESLint, and Biome all auto-discover config files in current and parent directories
+  - **Goal**: Running `lint lint .` without `--config` automatically finds `.lint.json` in the project root
+  - **Status**: Added `find_config_file()` that walks from `current_dir()` up to root looking for `.lint.json`. CLI `--config` still takes precedence. Unit test added.
+
+- [x] **Concise output format**
+  - Ruff supports `--output-format concise` for compact one-line-per-violation output
+  - **Goal**: `lint lint . --output concise` shows `file:line:col [severity] message (rule)` per violation
+  - **Status**: Added `Concise` variant to `OutputFormat`. `render_concise()` generates one-line format. CLI parsing test added.
+
+- [x] **`--cache-location` CLI flag**
+  - Ruff supports `--cache-dir` to customize the cache directory
+  - **Goal**: `lint lint . --cache --cache-location /tmp/lint_cache.json` uses a custom cache path
+  - **Status**: Added `cache_location: Option<PathBuf>` to `Commands::Lint`. Cache path defaults to `.lint_cache.json` but can be overridden. CLI parsing test added.
+
+- [x] **`--diff` CLI flag**
+  - Ruff supports `--diff` to preview fixes without writing changes
+  - **Goal**: `lint lint . --diff` shows a line-by-line diff of proposed fixes without modifying files
+  - **Status**: Added `diff: bool` to `Commands::Lint`. When `diff` is true, `run_lint_and_print` applies fixes in-memory, prints `---/+++` diff header and changed lines (`-` old, `+` new), but never writes files. CLI parsing test added.
+
+- [x] **`--fix-only` CLI flag**
+  - Ruff supports `--fix-only` to apply fixes without reporting or failing on remaining violations
+  - **Goal**: `lint lint . --fix-only` applies safe fixes, suppresses all output and exit codes for leftover violations
+  - **Status**: Added `fix_only: bool` to `Commands::Lint`. When `fix_only` is true, fixes are applied, results are not rendered/printed, and exit code is always 0. CLI parsing test added.
+
+- [x] **`--add-noqa` CLI flag**
+  - Ruff supports `--add-noqa` to automatically add `# noqa` suppression comments to failing lines
+  - **Goal**: `lint lint . --add-noqa` appends `// lint: ignore=rule-name` to each offending line and writes the files
+  - **Status**: Added `add_noqa: bool` to `Commands::Lint`. After linting, for each message, appends suppression directive to the line if not already present. Writes modified files. CLI parsing test added.
+
+- [x] **`explain` subcommand**
+  - Ruff supports `ruff rule <code>` to explain what a specific rule does
+  - **Goal**: `lint explain line-length` shows name, category, and description of the rule
+  - **Status**: Added `Explain { rule: String }` to `Commands`. `explain_rule()` searches generic and language-specific rules and prints details. Added `description()` to `Rule` and `LanguageRule` traits. `get_rules()` added to `LanguageRuleSet`. CLI parsing test added.
+
+- [x] **`--ignore-suppressions` CLI flag**
+  - Ruff supports `--ignore-noqa` to ignore all `# noqa` suppression comments
+  - **Goal**: `lint lint . --ignore-suppressions` reports all violations even if suppressed by inline comments
+  - **Status**: Added `ignore_suppressions: bool` to `Config`, `ConfigBuilder`, and `Commands::Lint`. In `linter.rs`, all suppression filtering (file-level, line-level, block-level, unused-suppression) is skipped when this flag is true. CLI parsing test added.
+
+- [x] **`check` subcommand alias**
+  - Ruff uses `ruff check` as the primary linting command
+  - **Goal**: `lint check .` is an alias for `lint lint .`
+  - **Status**: Added `#[command(alias = "check")]` to the `Lint` variant in `Commands`. CLI parsing test added.
+
+- [x] **GitLab Code Quality output format**
+  - Ruff supports GitLab Code Quality report format for CI integration
+  - **Goal**: `lint lint . --output gitlab` produces a GitLab-compatible JSON report
+  - **Status**: Added `Gitlab` variant to `OutputFormat`. `render_gitlab()` generates JSON array with `description`, `check_name`, `fingerprint`, `severity`, and `location` fields. CLI parsing test added.
+
+- [x] **Additional generic rules (batch 2)**
+  - **Goal**: Add `final-newline` and `no-mixed-line-endings` rules
+  - **Status**: Added `FinalNewlineRule` (detects missing trailing newline, includes fix) and `NoMixedLineEndingsRule` (detects mixed CRLF/LF). Both added to default enabled rules and `linter.rs` rule set. Unit tests added. Integration test updated.
+
+- [x] **`init` subcommand**
+  - Ruff supports `ruff .` with implicit config generation, but explicit `init` is common in tools like ESLint (`eslint --init`)
+  - **Goal**: `lint init` generates a default `.lint.json` in the current directory
+  - **Status**: Added `Init` to `Commands`. `init_config()` writes a pretty-printed default config JSON. If `.lint.json` already exists, prints a message and exits cleanly. CLI parsing test added.
+
+- [x] **`--output-format` alias**
+  - Ruff uses `--output-format` instead of `--output`
+  - **Goal**: `lint lint . --output-format json` is equivalent to `--output json`
+  - **Status**: Added `visible_alias = "output-format"` to the `output` argument in `Commands::Lint`. CLI parsing test added.
+
+- [x] **`--select-all` CLI flag**
+  - Ruff supports `--select ALL` to enable all rules
+  - **Goal**: `lint lint . --select-all` enables all built-in generic rules
+  - **Status**: Added `select_all: bool` to `Commands::Lint`. When true, all 8 generic rule names are added to `config.rule_set.enabled_rules`. CLI parsing test added.
+
 - [x] **Rule categories / severity-based grouping**
   - Ruff organizes rules into categories (E = errors, W = warnings, F = Pyflakes, etc.)
   - **Goal**: Rules have category prefixes (e.g., `style:line-length`, `bug:no-todo`)
@@ -224,14 +293,31 @@
 
 ## Done
 
-- [x] Comprehensive unit and integration test coverage (125 lib + 39 bin + 18 advanced + 10 basic = 192 tests)
+- [x] Comprehensive unit and integration test coverage (132 lib + 55 bin + 18 advanced + 10 basic = 215 tests)
 - [x] Source context in text output (offending line + caret underline)
 - [x] `--statistics` CLI flag (per-rule violation counts)
 - [x] `--show-fixes` CLI flag (list files modified by --fix)
 - [x] `--exclude` CLI flag (exclude file patterns at CLI level)
 - [x] JUnit XML output format (CI integration)
-- [x] Additional generic rules (`no-empty-file`, `no-consecutive-empty-lines`, `no-tabs`)
+- [x] Additional generic rules (`no-empty-file`, `no-consecutive-empty-lines`, `no-tabs`, `final-newline`, `no-mixed-line-endings`)
 - [x] `--show-settings` CLI flag (print effective config as JSON)
+- [x] Config file auto-discovery (`find_config_file()`)
+- [x] Concise output format (`--output concise`)
+- [x] `--cache-location` CLI flag (custom cache path)
+- [x] `--diff` CLI flag (preview fixes without writing)
+- [x] `--fix-only` CLI flag (apply fixes, suppress reporting)
+- [x] `--add-noqa` CLI flag (auto-add suppression comments)
+- [x] `explain` subcommand (describe a rule)
+- [x] `--ignore-suppressions` CLI flag (ignore suppression comments)
+- [x] `check` subcommand alias for `lint`
+- [x] GitLab Code Quality output format (`--output gitlab`)
+- [x] `init` subcommand (generate default config)
+- [x] `--output-format` alias for `--output`
+- [x] `--select-all` CLI flag (enable all built-in rules)
+- [x] `--no-ignore` CLI flag (disable all ignore patterns)
+- [x] VCS integration (auto-respect `.gitignore` patterns)
+- [x] `--cache-strategy` CLI flag (`metadata` or `content`)
+- [x] `--no-error-on-unmatched-pattern` CLI flag
 - [x] Rule categories (`style`, `correctness`, `custom`)
 - [x] File count in text summary ("Summary: X errors, Y warnings, Z infos in N files")
 - [x] Fix indicator `[*]` in text output for fixable issues
@@ -263,3 +349,25 @@
 - [x] Config `extends` for shareable configs
 - [x] Audit: removed unused dependencies (`glob`, `thiserror`) from `Cargo.toml`
 - [x] Audit: fixed all `cargo clippy` warnings (collapsed nested ifs, replaced `len()` comparisons with `is_empty()`, simplified `map_or`)
+
+## Brainstorming (from competitive intelligence round 8)
+
+- [x] **`--no-ignore` CLI flag**
+  - ESLint supports `--no-ignore` to disable all ignore patterns (both `.eslintignore` and `ignorePatterns` in config)
+  - **Goal**: `lint lint . --no-ignore` lints all files, including those in `node_modules`, `.git`, etc.
+  - **Status**: Added `no_ignore: bool` to `Commands::Lint`. When true, `config.ignore_patterns.clear()` is called after applying `--exclude`, so even explicit excludes are ignored. CLI parsing test added.
+
+- [x] **`--no-error-on-unmatched-pattern` CLI flag**
+  - ESLint supports `--no-error-on-unmatched-pattern` to avoid failing when a glob doesn't match any files
+  - **Goal**: `lint lint "nonexistent/**/*.rs" --no-error-on-unmatched-pattern` exits 0 instead of erroring
+  - **Status**: Added `no_error_on_unmatched_pattern: bool` to `Commands::Lint`. Our linter already silently skips non-existent paths and empty globs without erroring, so this flag is a no-op for compatibility with ESLint users. CLI parsing test added.
+
+- [x] **VCS integration (respect `.gitignore`)**
+  - Biome has VCS integration that automatically respects `.gitignore` patterns
+  - **Goal**: `lint lint .` automatically skips files listed in `.gitignore` without explicit config
+  - **Status**: `Linter` now parses `.gitignore` using `ignore::gitignore::GitignoreBuilder` and stores it in a `gitignore` field. `is_ignored()` checks `.gitignore` patterns in addition to `config.ignore_patterns`. The `ignore::Walk` already respected `.gitignore` for directory traversal; this adds explicit path checks. Unit test added.
+
+- [x] **`--cache-strategy` CLI flag**
+  - ESLint supports `--cache-strategy` with `metadata` (default) or `content` options
+  - **Goal**: `lint lint . --cache --cache-strategy content` hashes file contents for cache keying
+  - **Status**: Added `CacheStrategy` enum (`Metadata`/`Content`) to `config.rs`. Added `cache_strategy` field to `Config`, `ConfigBuilder`, and `Commands::Lint`. `lint_file()` in `linter.rs` uses `DefaultHasher` to hash content when `Content` strategy is active. `CacheEntry` now stores optional `content_hash`. `get_by_hash()` and `insert_with_hash()` added to `Cache`. CLI parsing test added.

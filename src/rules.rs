@@ -8,6 +8,9 @@ pub trait Rule: Send + Sync {
     fn category(&self) -> &str {
         "style"
     }
+    fn description(&self) -> &str {
+        ""
+    }
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
 }
 
@@ -284,6 +287,77 @@ impl Rule for NoTabsRule {
         }
 
         messages
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FinalNewlineRule;
+
+impl Rule for FinalNewlineRule {
+    fn name(&self) -> &str {
+        "final-newline"
+    }
+
+    fn category(&self) -> &str {
+        "style"
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        if content.is_empty() {
+            return Vec::new();
+        }
+        if !content.ends_with('\n') {
+            vec![LintMessage::new(
+                content.lines().count().max(1),
+                1,
+                Severity::Warning,
+                "File does not end with a newline".to_string(),
+                self.name().to_string(),
+                Some("Add a final newline at the end of the file.".to_string()),
+            )
+            .with_fix("\n".to_string())]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NoMixedLineEndingsRule;
+
+impl Rule for NoMixedLineEndingsRule {
+    fn name(&self) -> &str {
+        "no-mixed-line-endings"
+    }
+
+    fn category(&self) -> &str {
+        "style"
+    }
+
+    fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
+        let mut has_crlf = false;
+        let mut has_lf = false;
+        // Scan raw bytes for line endings
+        let bytes = content.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b'\r' {
+                has_crlf = true;
+            } else if bytes[i] == b'\n' && (i == 0 || bytes[i - 1] != b'\r') {
+                has_lf = true;
+            }
+        }
+        if has_crlf && has_lf {
+            vec![LintMessage::new(
+                1,
+                1,
+                Severity::Warning,
+                "Mixed line endings detected (both CRLF and LF)".to_string(),
+                self.name().to_string(),
+                Some("Use consistent line endings. Prefer LF (\n) for cross-platform compatibility.".to_string()),
+            )]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -621,5 +695,50 @@ mod tests {
         let messages = rule.check(content, Path::new("test.rs"));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].fix.as_ref().unwrap().replacement, "        let x = 5;");
+    }
+
+    #[test]
+    fn test_final_newline_rule_missing() {
+        let rule = FinalNewlineRule;
+        let messages = rule.check("let x = 5;", Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.contains("does not end with a newline"));
+        assert!(messages[0].fix.is_some());
+    }
+
+    #[test]
+    fn test_final_newline_rule_present() {
+        let rule = FinalNewlineRule;
+        let messages = rule.check("let x = 5;\n", Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_final_newline_rule_empty() {
+        let rule = FinalNewlineRule;
+        let messages = rule.check("", Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_no_mixed_line_endings_clean() {
+        let rule = NoMixedLineEndingsRule;
+        let messages = rule.check("line one\nline two\n", Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_no_mixed_line_endings_crlf_only() {
+        let rule = NoMixedLineEndingsRule;
+        let messages = rule.check("line one\r\nline two\r\n", Path::new("test.rs"));
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_no_mixed_line_endings_mixed() {
+        let rule = NoMixedLineEndingsRule;
+        let messages = rule.check("line one\nline two\r\n", Path::new("test.rs"));
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].message.contains("Mixed line endings"));
     }
 }
