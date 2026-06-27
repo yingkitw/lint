@@ -181,6 +181,9 @@ enum Commands {
 
         #[arg(long, value_name = "LINES")]
         max_function_lines: Option<usize>,
+
+        #[arg(long)]
+        profile: bool,
     },
     ListRules,
     Version,
@@ -212,6 +215,7 @@ struct RunOptions<'a> {
     fixable: Option<&'a [String]>,
     unfixable: Option<&'a [String]>,
     progress: bool,
+    profile: bool,
     per_dir_configs: std::collections::HashMap<PathBuf, lint::Config>,
 }
 
@@ -244,8 +248,9 @@ fn run_lint_and_print(
         None
     };
 
-    let linter =
+    let mut linter =
         lint::Linter::new_with_per_dir_configs(config, cache.clone(), opts.per_dir_configs.clone());
+    linter.set_profile(opts.profile);
     let mut results = linter.run()?;
 
     if let Some(pb) = progress_bar {
@@ -433,6 +438,47 @@ fn run_lint_and_print(
             for (rule, count) in pairs {
                 println!("  {}: {}", rule, count);
             }
+        }
+    }
+
+    if opts.profile && !opts.quiet && !opts.fix_only {
+        let rule_times = linter.rule_times();
+        let file_times = linter.file_times();
+        if !rule_times.is_empty() {
+            let mut rule_pairs: Vec<_> = rule_times.into_iter().collect();
+            rule_pairs.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("\n{}", "Rule timing:".bold());
+            for (rule, duration) in rule_pairs {
+                let code = lint::rules::code_from_name(&rule);
+                let display = if code != rule {
+                    format!("{} ({code})", rule)
+                } else {
+                    rule.to_string()
+                };
+                println!(
+                    "  {:<40} {:>10.3} ms",
+                    display,
+                    duration.as_secs_f64() * 1000.0
+                );
+            }
+        }
+        if !file_times.is_empty() {
+            let mut file_pairs = file_times;
+            file_pairs.sort_by(|a, b| b.1.cmp(&a.1));
+            let total: std::time::Duration = file_pairs.iter().map(|(_, d)| *d).sum();
+            println!("\n{}", "File timing (top 10):".bold());
+            for (path, duration) in file_pairs.iter().take(10) {
+                println!(
+                    "  {:<50} {:>10.3} ms",
+                    path.display().to_string(),
+                    duration.as_secs_f64() * 1000.0
+                );
+            }
+            println!(
+                "  Total: {} files, {:.3} ms",
+                file_pairs.len(),
+                total.as_secs_f64() * 1000.0
+            );
         }
     }
 
@@ -741,6 +787,7 @@ fn main() -> anyhow::Result<()> {
             validate_config,
             max_nesting_depth,
             max_function_lines,
+            profile,
         } => {
             let _ = no_error_on_unmatched_pattern;
             match color.as_deref() {
@@ -955,6 +1002,7 @@ fn main() -> anyhow::Result<()> {
                         fixable: fixable.as_deref(),
                         unfixable: unfixable.as_deref(),
                         progress,
+                        profile,
                         per_dir_configs: per_dir_configs.clone(),
                     },
                 )?;
@@ -1002,6 +1050,7 @@ fn main() -> anyhow::Result<()> {
                                 fixable: fixable.as_deref(),
                                 unfixable: unfixable.as_deref(),
                                 progress,
+                                profile,
                                 per_dir_configs: per_dir_configs.clone(),
                             },
                         )?;
@@ -1033,6 +1082,7 @@ fn main() -> anyhow::Result<()> {
                         fixable: fixable.as_deref(),
                         unfixable: unfixable.as_deref(),
                         progress,
+                        profile,
                         per_dir_configs: per_dir_configs.clone(),
                     },
                 )?;
@@ -1197,6 +1247,8 @@ fn explain_rule(rule_name: &str) -> anyhow::Result<()> {
                 r.description(),
                 r.has_fix(),
                 r.code(),
+                r.default_severity(),
+                r.url(),
             )
         })
         .or_else(|| {
@@ -1212,16 +1264,22 @@ fn explain_rule(rule_name: &str) -> anyhow::Result<()> {
                         r.description(),
                         r.has_fix(),
                         r.code(),
+                        r.default_severity(),
+                        r.url(),
                     )
                 })
         });
 
-    if let Some((name, category, description, has_fix, code)) = found {
+    if let Some((name, category, description, has_fix, code, severity, url)) = found {
         println!("Rule: {}", name);
         println!("Code: {}", code);
         println!("Category: {}", category);
+        println!("Default severity: {}", severity.as_str());
         println!("Description: {}", description);
         println!("Auto-fix: {}", if has_fix { "yes" } else { "no" });
+        if !url.is_empty() {
+            println!("URL: {}", url);
+        }
         return Ok(());
     }
 
@@ -1880,6 +1938,7 @@ mod tests {
                 validate_config,
                 max_nesting_depth,
                 max_function_lines,
+                profile,
             } => {
                 let _ = no_cache;
                 let _ = no_config;
@@ -1887,6 +1946,7 @@ mod tests {
                 let _ = validate_config;
                 let _ = max_nesting_depth;
                 let _ = max_function_lines;
+                let _ = profile;
                 let _ = check;
                 let _ = max_diagnostics;
                 let _ = baseline;
@@ -2356,6 +2416,17 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_profile_parsing() {
+        let cli = Cli::parse_from(["lint", "lint", "src/", "--profile"]);
+        match cli.command {
+            Commands::Lint { profile, .. } => {
+                assert!(profile);
+            }
+            _ => panic!("Expected Lint command"),
+        }
+    }
+
+    #[test]
     fn test_cli_explain_parsing() {
         let cli = Cli::parse_from(["lint", "explain", "line-length"]);
         match cli.command {
@@ -2788,6 +2859,7 @@ mod tests {
                 fixable: None,
                 unfixable: None,
                 progress: false,
+                profile: false,
                 per_dir_configs: std::collections::HashMap::new(),
             },
         )?;

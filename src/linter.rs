@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 struct SuppressionDirective {
@@ -36,6 +37,9 @@ pub struct Linter {
     gitignore: Option<ignore::gitignore::Gitignore>,
     ignore_names: std::collections::HashSet<String>,
     per_dir_configs: std::collections::HashMap<PathBuf, DirConfig>,
+    profile: bool,
+    rule_times: Arc<Mutex<HashMap<String, std::time::Duration>>>,
+    file_times: Arc<Mutex<Vec<(PathBuf, std::time::Duration)>>>,
 }
 
 impl Linter {
@@ -78,6 +82,9 @@ impl Linter {
             gitignore,
             ignore_names,
             per_dir_configs: per_dir,
+            profile: false,
+            rule_times: Arc::new(Mutex::new(HashMap::new())),
+            file_times: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -87,6 +94,18 @@ impl Linter {
 
     pub fn language_rule_set(&self) -> &LanguageRuleSet {
         &self.language_rule_set
+    }
+
+    pub fn set_profile(&mut self, enabled: bool) {
+        self.profile = enabled;
+    }
+
+    pub fn rule_times(&self) -> HashMap<String, Duration> {
+        self.rule_times.lock().unwrap().clone()
+    }
+
+    pub fn file_times(&self) -> Vec<(PathBuf, Duration)> {
+        self.file_times.lock().unwrap().clone()
     }
 
     fn build_from_config(
@@ -387,7 +406,15 @@ impl Linter {
             }
         }
 
+        let lint_start = Instant::now();
         let result = self.lint_content(&content, path)?;
+        if self.profile {
+            let elapsed = lint_start.elapsed();
+            self.file_times
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), elapsed));
+        }
 
         if !use_content_hash {
             if let Some((mtime, size)) = cache_key
@@ -450,13 +477,31 @@ impl Linter {
             if !config.ignore_suppressions && is_file_ignored(rule.name()) {
                 continue;
             }
+            let rule_start = Instant::now();
             let messages = rule.check(&result.file_content, path);
+            if self.profile {
+                let elapsed = rule_start.elapsed();
+                let mut times = self.rule_times.lock().unwrap();
+                let entry = times
+                    .entry(rule.name().to_string())
+                    .or_insert(Duration::ZERO);
+                *entry += elapsed;
+            }
             for message in messages {
                 result.add_message(message);
             }
         }
 
+        let lang_start = Instant::now();
         let language_messages = language_rule_set.check(&result.file_content, path);
+        if self.profile {
+            let elapsed = lang_start.elapsed();
+            let mut times = self.rule_times.lock().unwrap();
+            let entry = times
+                .entry("__language_rules__".to_string())
+                .or_insert(Duration::ZERO);
+            *entry += elapsed;
+        }
         for message in language_messages {
             if !config.ignore_suppressions && is_file_ignored(&message.rule) {
                 continue;

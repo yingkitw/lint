@@ -18,6 +18,12 @@ pub trait Rule: Send + Sync {
     fn has_fix(&self) -> bool {
         false
     }
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+    fn url(&self) -> &str {
+        ""
+    }
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
 }
 
@@ -214,7 +220,7 @@ impl Rule for LineLengthRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     self.max_length + 1,
-                    Severity::Warning,
+                    self.default_severity(),
                     format!("Line exceeds maximum length of {} characters", self.max_length),
                     self.name().to_string(),
                     Some(format!(
@@ -258,7 +264,7 @@ impl Rule for TrailingWhitespaceRule {
                 let message = LintMessage::new(
                     line_num + 1,
                     line.len(),
-                    Severity::Warning,
+                    self.default_severity(),
                     "Trailing whitespace detected".to_string(),
                     self.name().to_string(),
                     Some("Delete spaces/tabs at end of line. In most editors: place cursor at line end and press Backspace until clean.".to_string()),
@@ -294,6 +300,10 @@ impl Rule for NoTodoRule {
         "correctness"
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -302,7 +312,7 @@ impl Rule for NoTodoRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find(|c: char| c.is_ascii_alphanumeric()).unwrap_or(0),
-                    Severity::Info,
+                    self.default_severity(),
                     "TODO/FIXME comment found".to_string(),
                     self.name().to_string(),
                     Some("Create a tracking issue and replace with issue reference, or implement the fix and remove the comment.".to_string()),
@@ -336,7 +346,7 @@ impl Rule for NoEmptyFileRule {
             vec![LintMessage::new(
                 1,
                 1,
-                Severity::Warning,
+                self.default_severity(),
                 "Empty file detected".to_string(),
                 self.name().to_string(),
                 Some("Add content or delete the file if it is unused.".to_string()),
@@ -400,7 +410,7 @@ impl Rule for NoConsecutiveEmptyLinesRule {
                 messages.push(LintMessage::new(
                     i + 1,
                     1,
-                    Severity::Warning,
+                    self.default_severity(),
                     "Consecutive empty lines detected".to_string(),
                     self.name().to_string(),
                     Some("Remove extra blank lines; files should not contain more than one consecutive empty line.".to_string()),
@@ -455,7 +465,7 @@ impl Rule for NoTabsRule {
                     LintMessage::new(
                         line_num + 1,
                         col + 1,
-                        Severity::Warning,
+                        self.default_severity(),
                         "Tab character detected; use spaces for indentation".to_string(),
                         self.name().to_string(),
                         Some("Replace tabs with spaces. Most editors support 'Insert spaces instead of tabs' in settings.".to_string()),
@@ -498,7 +508,7 @@ impl Rule for FinalNewlineRule {
                 LintMessage::new(
                     content.lines().count().max(1),
                     1,
-                    Severity::Warning,
+                    self.default_severity(),
                     "File does not end with a newline".to_string(),
                     self.name().to_string(),
                     Some("Add a final newline at the end of the file.".to_string()),
@@ -549,7 +559,7 @@ impl Rule for NoMixedLineEndingsRule {
                 let mut msg = LintMessage::new(
                     1,
                     1,
-                    Severity::Warning,
+                    self.default_severity(),
                     "Mixed line endings detected (both CRLF and LF)".to_string(),
                     self.name().to_string(),
                     Some("Use consistent line endings. Prefer LF (\n) for cross-platform compatibility.".to_string()),
@@ -600,7 +610,7 @@ impl Rule for MaxNestingDepthRule {
                 messages.push(LintMessage::new(
                     line_num,
                     1,
-                    Severity::Warning,
+                    self.default_severity(),
                     format!(
                         "Nesting depth of {} exceeds maximum {}",
                         depth, self.max_depth
@@ -682,7 +692,7 @@ impl Rule for MaxFunctionLinesRule {
                     messages.push(LintMessage::new(
                         start_line,
                         1,
-                        Severity::Warning,
+                        self.default_severity(),
                         format!(
                             "Function spans {} lines, exceeding maximum {}",
                             func_len, self.max_lines
@@ -722,6 +732,10 @@ impl Rule for SortImportsRule {
         true
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
@@ -744,7 +758,7 @@ impl Rule for SortImportsRule {
                             messages.push(LintMessage::new(
                                 j + 1,
                                 1,
-                                Severity::Info,
+                                self.default_severity(),
                                 format!(
                                     "Import '{}' is out of alphabetical order (should come before '{}')",
                                     key, prev_key
@@ -887,6 +901,10 @@ impl Rule for HardcodedSecretRule {
         "Detects hardcoded credentials such as passwords, API keys, and tokens in source code."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*SECRET_PATTERN;
@@ -904,7 +922,7 @@ impl Rule for HardcodedSecretRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     col,
-                    Severity::Error,
+                    self.default_severity(),
                     "Hardcoded secret detected".to_string(),
                     self.name().to_string(),
                     Some("Use environment variables or a secrets manager instead of hardcoding credentials".to_string()),
@@ -933,6 +951,10 @@ impl Rule for UnsafeEvalRule {
         "Detects unsafe eval() calls which can lead to code injection vulnerabilities."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -945,7 +967,7 @@ impl Rule for UnsafeEvalRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("eval").unwrap_or(0),
-                    Severity::Error,
+                    self.default_severity(),
                     "Unsafe eval() call detected".to_string(),
                     self.name().to_string(),
                     Some("Avoid eval(). Use JSON.parse for JSON data, or structured parsing for other formats".to_string()),
@@ -976,6 +998,10 @@ impl Rule for SqlInjectionRiskRule {
         "Detects potential SQL injection risks from string concatenation or interpolation in queries."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*SQL_INJECTION_PATTERN;
@@ -988,7 +1014,7 @@ impl Rule for SqlInjectionRiskRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.to_lowercase().find("select").or_else(|| line.to_lowercase().find("insert")).or_else(|| line.to_lowercase().find("update")).or_else(|| line.to_lowercase().find("delete")).unwrap_or(0),
-                    Severity::Error,
+                    self.default_severity(),
                     "Potential SQL injection risk from string concatenation".to_string(),
                     self.name().to_string(),
                     Some("Use parameterized queries or prepared statements instead of string concatenation".to_string()),
@@ -1636,6 +1662,21 @@ mod tests {
         let rule = SqlInjectionRiskRule;
         let messages = rule.check("const query = 'SELECT * FROM users';", Path::new("test.js"));
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_default_severity_values() {
+        assert_eq!(
+            LineLengthRule { max_length: 80 }.default_severity(),
+            Severity::Warning
+        );
+        assert_eq!(TrailingWhitespaceRule.default_severity(), Severity::Warning);
+        assert_eq!(NoTodoRule::default().default_severity(), Severity::Info);
+        assert_eq!(NoEmptyFileRule.default_severity(), Severity::Warning);
+        assert_eq!(HardcodedSecretRule.default_severity(), Severity::Error);
+        assert_eq!(UnsafeEvalRule.default_severity(), Severity::Error);
+        assert_eq!(SqlInjectionRiskRule.default_severity(), Severity::Error);
+        assert_eq!(SortImportsRule.default_severity(), Severity::Info);
     }
 
     #[test]

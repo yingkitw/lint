@@ -17,6 +17,12 @@ pub trait LanguageRule: Send + Sync {
     fn has_fix(&self) -> bool {
         false
     }
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+    fn url(&self) -> &str {
+        ""
+    }
     fn check(&self, content: &str, file_path: &Path) -> Vec<LintMessage>;
     fn supports_extension(&self, extension: &str) -> bool;
 }
@@ -45,7 +51,7 @@ impl LanguageRule for ConsoleLogRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("console").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "Console statement found".to_string(),
                     self.name().to_string(),
                     Some("Remove before release or use a logger: `import { logger } from 'logger'; logger.debug('message')`".to_string()),
@@ -84,7 +90,7 @@ impl LanguageRule for VarUsageRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("var").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "var usage detected".to_string(),
                     self.name().to_string(),
                     Some("Replace with let or const: 'var x = 1' → 'const x = 1' (or 'let x = 1' if reassigned)".to_string()),
@@ -124,7 +130,7 @@ impl LanguageRule for PythonPrintRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("print").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "Print statement found".to_string(),
                     self.name().to_string(),
                     Some("Use logging: 'import logging; logging.info(\"message\")' or remove for production".to_string()),
@@ -152,6 +158,10 @@ impl LanguageRule for PythonStyleRule {
         "Enforces Python naming conventions and style guidelines."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -166,7 +176,7 @@ impl LanguageRule for PythonStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("class").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "Class name should use CapWords (PascalCase)".to_string(),
                     self.name().to_string(),
                     Some("Rename class to use PascalCase (e.g., MyClass)".to_string()),
@@ -183,7 +193,7 @@ impl LanguageRule for PythonStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("def").unwrap_or(0),
-                    Severity::Info,
+                    self.default_severity(),
                     "Function name should use snake_case".to_string(),
                     self.name().to_string(),
                     Some("Rename function to use snake_case (e.g., my_function)".to_string()),
@@ -228,7 +238,7 @@ impl LanguageRule for GoStyleRule {
                     messages.push(LintMessage::new(
                         line_num + 1,
                         line.find("func").unwrap_or(0),
-                        Severity::Warning,
+                        self.default_severity(),
                         "Exported function detected".to_string(),
                         self.name().to_string(),
                         Some("Ensure exported functions have documentation comments".to_string()),
@@ -257,6 +267,10 @@ impl LanguageRule for JavaStyleRule {
         "Enforces Java naming conventions and style guidelines."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -271,7 +285,7 @@ impl LanguageRule for JavaStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("class").unwrap_or(0),
-                    Severity::Error,
+                    self.default_severity(),
                     "Class name should use PascalCase".to_string(),
                     self.name().to_string(),
                     Some("Rename class to start with uppercase letter (e.g., MyClass)".to_string()),
@@ -282,7 +296,7 @@ impl LanguageRule for JavaStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("System.out.print").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "System.out.print statement found".to_string(),
                     self.name().to_string(),
                     Some("Use SLF4J: 'private static final Logger log = LoggerFactory.getLogger(MyClass.class); log.info(\"message\");'".to_string()),
@@ -321,7 +335,7 @@ impl LanguageRule for RustUnwrapRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find(".unwrap()").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "unwrap() usage detected".to_string(),
                     self.name().to_string(),
                     Some("Use 'let x = opt?;' to propagate, or 'match opt { Some(v) => v, None => return Err(...) }' for explicit handling".to_string()),
@@ -360,7 +374,7 @@ impl LanguageRule for RustExpectRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find(".expect(").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "expect() usage detected".to_string(),
                     self.name().to_string(),
                     Some("Use 'let x = opt?;' to propagate, or 'match opt { Some(v) => v, None => return Err(...) }' for explicit handling".to_string()),
@@ -422,7 +436,7 @@ impl LanguageRule for SemicolonRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.len(),
-                    Severity::Warning,
+                    self.default_severity(),
                     "Missing semicolon".to_string(),
                     self.name().to_string(),
                     Some("Add semicolon at the end of the statement".to_string()),
@@ -461,7 +475,7 @@ impl LanguageRule for RubyPutsRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("puts").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "puts statement found".to_string(),
                     self.name().to_string(),
                     Some("Use Logger: 'require \"logger\"; Logger.new($stdout).info(\"message\")' or remove for production".to_string()),
@@ -489,6 +503,10 @@ impl LanguageRule for RubyStyleRule {
         "Enforces Ruby naming conventions and style guidelines."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -503,7 +521,7 @@ impl LanguageRule for RubyStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("class").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "Class name should use CamelCase".to_string(),
                     self.name().to_string(),
                     Some("Rename class to use CamelCase (e.g., MyClass)".to_string()),
@@ -514,7 +532,7 @@ impl LanguageRule for RubyStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("def").unwrap_or(0),
-                    Severity::Info,
+                    self.default_severity(),
                     "Setter method detected".to_string(),
                     self.name().to_string(),
                     Some("Consider using attr_writer or attr_accessor".to_string()),
@@ -553,7 +571,7 @@ impl LanguageRule for PhpEchoRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("echo").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "echo statement found".to_string(),
                     self.name().to_string(),
                     Some(
@@ -596,7 +614,7 @@ impl LanguageRule for SwiftPrintRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("print").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "print() call found".to_string(),
                     self.name().to_string(),
                     Some("Use OSLog: 'import os.log; os_log(\"message\", log: .default, type: .info)'".to_string()),
@@ -624,6 +642,10 @@ impl LanguageRule for KotlinStyleRule {
         "Enforces Kotlin naming conventions and style guidelines."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -638,7 +660,7 @@ impl LanguageRule for KotlinStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("class").unwrap_or(0),
-                    Severity::Error,
+                    self.default_severity(),
                     "Class name should use PascalCase".to_string(),
                     self.name().to_string(),
                     Some("Rename class to start with uppercase letter (e.g., MyClass)".to_string()),
@@ -649,7 +671,7 @@ impl LanguageRule for KotlinStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("println(").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "println() call found".to_string(),
                     self.name().to_string(),
                     Some("Use slf4j: 'LoggerFactory.getLogger(MyClass::class.java).info(\"message\")'".to_string()),
@@ -688,7 +710,7 @@ impl LanguageRule for DartPrintRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("print").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "print() call found".to_string(),
                     self.name().to_string(),
                     Some("Replace with debugPrint() or use the logging package: import 'dart:developer' as developer; developer.log('message')".to_string()),
@@ -729,7 +751,7 @@ impl LanguageRule for CSharpConsoleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     col,
-                    Severity::Warning,
+                    self.default_severity(),
                     "Console output detected".to_string(),
                     self.name().to_string(),
                     Some("Use ILogger from Microsoft.Extensions.Logging: inject ILogger<T> and call _logger.LogInformation(\"message\")".to_string()),
@@ -757,6 +779,10 @@ impl LanguageRule for CSharpStyleRule {
         "Enforces C# naming conventions and style guidelines."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Error
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
 
@@ -771,7 +797,7 @@ impl LanguageRule for CSharpStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("class").unwrap_or(0),
-                    Severity::Error,
+                    self.default_severity(),
                     "Class name should use PascalCase".to_string(),
                     self.name().to_string(),
                     Some("Rename class: 'class myClass' → 'class MyClass'".to_string()),
@@ -813,7 +839,7 @@ impl LanguageRule for ShellEchoRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("echo").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "Unquoted variable in echo".to_string(),
                     self.name().to_string(),
                     Some(
@@ -847,6 +873,10 @@ impl LanguageRule for SqlSelectStarRule {
         "Warns about `SELECT *` queries that can break when table schemas change."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*SQL_SELECT_STAR_PATTERN;
@@ -859,7 +889,7 @@ impl LanguageRule for SqlSelectStarRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("SELECT").or(line.find("select")).unwrap_or(0),
-                    Severity::Info,
+                    self.default_severity(),
                     "SELECT * usage detected".to_string(),
                     self.name().to_string(),
                     Some("List explicit columns: 'SELECT *' → 'SELECT id, name, created_at' for clarity and performance".to_string()),
@@ -898,7 +928,7 @@ impl LanguageRule for LuaPrintRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("print").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "print() call found".to_string(),
                     self.name().to_string(),
                     Some("Use a logging library or remove before production: require('log') or similar".to_string()),
@@ -938,7 +968,7 @@ impl LanguageRule for ScalaPrintRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("println").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "println() call found".to_string(),
                     self.name().to_string(),
                     Some(
@@ -971,6 +1001,10 @@ impl LanguageRule for RPrintRule {
         "Detects `print()` statements that should not be in production R code."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*R_PRINT_PATTERN;
@@ -980,7 +1014,7 @@ impl LanguageRule for RPrintRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("print").unwrap_or(0),
-                    Severity::Info,
+                    self.default_severity(),
                     "print() call found".to_string(),
                     self.name().to_string(),
                     Some(
@@ -1023,7 +1057,7 @@ impl LanguageRule for ZigDebugPrintRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("std.debug.print").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "std.debug.print detected".to_string(),
                     self.name().to_string(),
                     Some(
@@ -1057,6 +1091,10 @@ impl LanguageRule for HtmlInlineStyleRule {
         "Warns about inline `style` attributes in HTML; prefer CSS classes."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*HTML_STYLE_PATTERN;
@@ -1066,7 +1104,7 @@ impl LanguageRule for HtmlInlineStyleRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("style=").unwrap_or(0),
-                    Severity::Info,
+                    self.default_severity(),
                     "Inline style detected".to_string(),
                     self.name().to_string(),
                     Some("Move styles to CSS: use class=\"my-class\" and define in <style> or external .css file".to_string()),
@@ -1105,7 +1143,7 @@ impl LanguageRule for HtmlMissingAltRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("<img").unwrap_or(0),
-                    Severity::Warning,
+                    self.default_severity(),
                     "img tag missing alt attribute".to_string(),
                     self.name().to_string(),
                     Some("Add alt text for accessibility: <img src=\"x.png\" alt=\"Description of image\">".to_string()),
@@ -1136,6 +1174,10 @@ impl LanguageRule for CssImportantRule {
         "Warns about `!important` usage in CSS that can break maintainability."
     }
 
+    fn default_severity(&self) -> Severity {
+        Severity::Info
+    }
+
     fn check(&self, content: &str, _file_path: &Path) -> Vec<LintMessage> {
         let mut messages = Vec::new();
         let pattern = &*CSS_IMPORTANT_PATTERN;
@@ -1145,7 +1187,7 @@ impl LanguageRule for CssImportantRule {
                 messages.push(LintMessage::new(
                     line_num + 1,
                     line.find("!important").unwrap_or(0),
-                    Severity::Info,
+                    self.default_severity(),
                     "!important usage detected".to_string(),
                     self.name().to_string(),
                     Some("Increase selector specificity instead: use .parent .child or BEM naming instead of !important".to_string()),
@@ -1476,6 +1518,20 @@ mod tests {
         let messages = rule.check(content, Path::new("test.css"));
         assert_eq!(messages.len(), 1);
         assert!(messages[0].message.contains("!important"));
+    }
+
+    #[test]
+    fn test_default_severity_values() {
+        assert_eq!(ConsoleLogRule.default_severity(), Severity::Warning);
+        assert_eq!(PythonStyleRule.default_severity(), Severity::Info);
+        assert_eq!(JavaStyleRule.default_severity(), Severity::Error);
+        assert_eq!(KotlinStyleRule.default_severity(), Severity::Error);
+        assert_eq!(CSharpStyleRule.default_severity(), Severity::Error);
+        assert_eq!(RubyStyleRule.default_severity(), Severity::Info);
+        assert_eq!(SqlSelectStarRule.default_severity(), Severity::Info);
+        assert_eq!(RPrintRule.default_severity(), Severity::Info);
+        assert_eq!(HtmlInlineStyleRule.default_severity(), Severity::Info);
+        assert_eq!(CssImportantRule.default_severity(), Severity::Info);
     }
 
     #[test]

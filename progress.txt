@@ -1,0 +1,38 @@
+Session: continued autonomous development
+Date: current
+
+Completed items:
+1. Per-rule default severity
+   - Files: src/rules.rs, src/language_rules.rs, src/main.rs, src/output.rs
+   - Added fn default_severity(&self) -> Severity to Rule and LanguageRule traits
+   - Overridden severities for: NoTodoRule (Info), SortImportsRule (Info), HardcodedSecretRule (Error), UnsafeEvalRule (Error), SqlInjectionRiskRule (Error), PythonStyleRule (Info), JavaStyleRule (Error), KotlinStyleRule (Error), CSharpStyleRule (Error), RubyStyleRule (Info), SqlSelectStarRule (Info), RPrintRule (Info), HtmlInlineStyleRule (Info), CssImportantRule (Info)
+   - All check() methods now use self.default_severity()
+   - explain output shows default severity
+   - Tests: test_default_severity_values in rules.rs and language_rules.rs
+   - Lines changed: ~100
+   - Tests: 324 passed
+
+2. Rule documentation URL in explain output
+   - Files: src/rules.rs, src/language_rules.rs, src/main.rs
+   - Added fn url(&self) -> &str to Rule and LanguageRule traits with default ""
+   - explain_rule() prints URL only when non-empty
+   - Lines changed: ~20
+   - Tests: 324 passed
+
+3. Lint timing / --profile flag
+   - Files: src/main.rs, src/linter.rs
+   - Added --profile CLI flag
+   - Added profile: bool, rule_times, file_times to Linter struct
+   - Modified lint_content() to time each generic rule check
+   - Modified lint_file() to time whole file lint
+   - run_lint_and_print() prints rule timing (sorted) and file timing (top 10 + total)
+   - Test: test_cli_profile_parsing
+   - Lines changed: ~80
+   - Tests: 325 passed
+
+Verification stack:
+- cargo fmt --check: PASS
+- cargo clippy --all-targets --all-features -- -D warnings: PASS
+- cargo test --all-targets --all-features: PASS (325 tests)
+
+Next milestone: None defined. Brainstorming section in TODO.md still has ideas but all previously identified gaps are now implemented.

@@ -664,17 +664,20 @@
   - **Goal**: Support comma-separated lists like `// lint: ignore=W001,W002`
   - **Status**: Updated all suppression parsers (`is_line_suppressed`, `parse_block_suppressions`, `parse_file_level_ignore`, `parse_suppression_directives`) to split by comma and check each rule. `lint: ignore=W001,W002`, `lint: disable=W001,W002`, `lint: enable=W001,W002`, and `lint: ignore-file=W001,W002` all work. Unused suppression detection correctly evaluates each rule in the list independently. 1 test (`test_multiple_inline_ignore_patterns`).
 
-- [ ] **Per-rule default severity**
+- [x] **Per-rule default severity**
   - All rules currently default to Warning; security rules like `hardcoded-secret` should arguably be Error by default
   - **Goal**: Rules self-report a default severity; `severity_overrides` can upgrade or downgrade
+  - **Status**: Added `fn default_severity(&self) -> Severity` to `Rule` and `LanguageRule` traits with default `Severity::Warning`. Overridden for: `NoTodoRule` (Info), `SortImportsRule` (Info), `HardcodedSecretRule` (Error), `UnsafeEvalRule` (Error), `SqlInjectionRiskRule` (Error), `PythonStyleRule` (Info), `JavaStyleRule` (Error), `KotlinStyleRule` (Error), `CSharpStyleRule` (Error), `RubyStyleRule` (Info), `SqlSelectStarRule` (Info), `RPrintRule` (Info), `HtmlInlineStyleRule` (Info), `CssImportantRule` (Info). All `check()` methods now use `self.default_severity()` instead of hardcoded values. `explain` output shows default severity. 2 tests (`test_default_severity_values` in both `rules.rs` and `language_rules.rs`).
 
-- [ ] **Rule documentation URL in `explain` output**
+- [x] **Rule documentation URL in `explain` output**
   - Ruff and ESLint provide URLs to rule docs; users often want to read more
   - **Goal**: Add `url()` method to `Rule`/`LanguageRule`; `explain` prints it
+  - **Status**: Added `fn url(&self) -> &str` to both `Rule` and `LanguageRule` traits with default `""`. `explain_rule()` now includes `r.url()` in the lookup tuple and prints `URL: ...` only when the URL is non-empty. All existing rules default to empty string; future rules can override with real documentation links.
 
-- [ ] **Lint timing / `--profile` flag**
+- [x] **Lint timing / `--profile` flag**
   - Large codebases want to know which rules are slow
   - **Goal**: `--profile` prints per-rule and per-file timing after linting
+  - **Status**: Added `--profile` CLI flag. Added `profile: bool`, `rule_times: Arc<Mutex<HashMap<String, Duration>>>`, and `file_times: Arc<Mutex<Vec<(PathBuf, Duration)>>>}` to `Linter`. Modified `lint_content()` to time each generic rule check, and `lint_file()` to time the whole file lint. `language_rule_set.check()` is timed as a single bucket labeled `__language_rules__`. `run_lint_and_print()` prints rule timing (sorted by duration) and file timing (top 10 + total) when `--profile` is enabled.
 
 - [x] **SARIF output format**
   - GitHub Advanced Security, Azure DevOps, and many CI systems consume SARIF for code scanning dashboards
