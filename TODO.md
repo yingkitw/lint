@@ -293,6 +293,12 @@
 
 ## Done
 
+- [x] **Deep modularize codebase**
+  - Split `src/rules.rs` into `src/rules/` with `codes.rs`, `custom.rs`, `builtin/mod.rs`, and per-rule files
+  - Split `src/language_rules.rs` into `src/language_rules/` with `builtin/mod.rs` and per-language files
+  - Extract CLI types and output renderers from `src/main.rs` into `src/cli/mod.rs` and `src/cli/output.rs`
+  - All checks pass: `cargo fmt`, `cargo clippy`, `cargo test`
+
 - [x] Comprehensive unit and integration test coverage (164 lib + 110 bin + 18 advanced + 10 basic = 302 tests)
 - [x] Source context in text output (offending line + caret underline)
 - [x] `--statistics` CLI flag (per-rule violation counts)

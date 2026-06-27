@@ -1,4 +1,4 @@
-use crate::output::{LintMessage, Severity};
+use crate::output::LintMessage;
 use crate::rules::Rule;
 use std::path::Path;
 
@@ -56,4 +56,25 @@ impl Rule for NoConsecutiveEmptyLinesRule {
 
         messages
     }
+}
+
+fn collapse_empty_lines(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result = Vec::new();
+    let mut prev_empty = false;
+
+    for line in lines {
+        let is_empty = line.trim().is_empty();
+        if is_empty && prev_empty {
+            continue;
+        }
+        result.push(line);
+        prev_empty = is_empty;
+    }
+
+    let mut output = result.join("\n");
+    if content.ends_with('\n') || content.ends_with("\r\n") {
+        output.push('\n');
+    }
+    output
 }

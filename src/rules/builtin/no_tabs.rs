@@ -1,4 +1,4 @@
-use crate::output::{LintMessage, Severity};
+use crate::output::LintMessage;
 use crate::rules::Rule;
 use std::path::Path;
 

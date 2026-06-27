@@ -93,6 +93,8 @@ pub fn name_from_code(code: &str) -> &str {
         "L026" => "css-avoid-important",
         _ => code,
     }
+}
+
 pub fn plugin_rules(plugin: &str) -> Vec<String> {
     match plugin {
         "security" => vec![

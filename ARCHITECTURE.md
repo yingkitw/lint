@@ -6,16 +6,60 @@ Module relationships, data flow, and deployment topology for the `lint` project.
 
 ```
 src/
-├── main.rs           # CLI binary: argument parsing, command dispatch, output rendering
-├── mcp_main.rs       # MCP binary: thin wrapper to start McpServer
-├── lib.rs            # Library root: public API re-exports, convenience functions
-├── config.rs         # Config / ConfigBuilder: serde-aware configuration model
-├── linter.rs         # Linter: file discovery, rule execution, cache integration
-├── rules.rs          # UniversalRule trait + built-in universal rules
-├── language_rules.rs # LanguageRule trait + 18+ language-specific rules
-├── output.rs         # LintResult / LintMessage / Severity / Fix structs
-├── cache.rs          # Cache / CacheEntry: filesystem-backed result cache
-└── mcp.rs            # McpServer: JSON-RPC over TCP, tool dispatch
+├── main.rs                  # CLI binary: command dispatch, core orchestration
+│   └── cli/
+│       ├── mod.rs           # Cli / Commands / RunOptions definitions
+│       └── output.rs        # Output format renderers (text/json/sarif/junit/gitlab)
+├── mcp_main.rs              # MCP binary: thin wrapper to start McpServer
+├── lib.rs                   # Library root: public API re-exports, convenience functions
+├── config.rs                # Config / ConfigBuilder: serde-aware configuration model
+├── linter.rs                # Linter: file discovery, rule execution, cache integration
+├── rules/
+│   ├── mod.rs               # Rule trait, RuleSet, test module
+│   ├── codes.rs             # code_from_name, name_from_code, known_rules, known_plugins, etc.
+│   ├── custom.rs            # CustomRule / CustomRuleDefinition
+│   └── builtin/
+│       ├── mod.rs           # Re-exports all built-in rules
+│       ├── final_newline.rs
+│       ├── hardcoded_secret.rs
+│       ├── line_length.rs
+│       ├── max_function_lines.rs
+│       ├── max_nesting_depth.rs
+│       ├── no_consecutive_empty_lines.rs
+│       ├── no_empty_file.rs
+│       ├── no_mixed_line_endings.rs
+│       ├── no_tabs.rs
+│       ├── no_todo.rs
+│       ├── sort_imports.rs
+│       ├── sql_injection_risk.rs
+│       ├── trailing_whitespace.rs
+│       └── unsafe_eval.rs
+├── language_rules/
+│   ├── mod.rs               # LanguageRule trait, LanguageRuleSet, test module
+│   └── builtin/
+│       ├── mod.rs           # Re-exports all language-specific rules
+│       ├── css.rs
+│       ├── csharp.rs
+│       ├── dart.rs
+│       ├── go.rs
+│       ├── html.rs
+│       ├── java.rs
+│       ├── js_ts.rs
+│       ├── kotlin.rs
+│       ├── lua.rs
+│       ├── php.rs
+│       ├── python.rs
+│       ├── r.rs
+│       ├── ruby.rs
+│       ├── rust.rs
+│       ├── scala.rs
+│       ├── shell.rs
+│       ├── sql.rs
+│       ├── swift.rs
+│       └── zig.rs
+├── output.rs                # LintResult / LintMessage / Severity / Fix structs
+├── cache.rs                 # Cache / CacheEntry: filesystem-backed result cache
+└── mcp.rs                   # McpServer: JSON-RPC over TCP, tool dispatch
 ```
 
 ## 2. Data Flow

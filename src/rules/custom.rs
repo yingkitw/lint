@@ -72,3 +72,4 @@ impl Rule for CustomRule {
 
         messages
     }
+}
